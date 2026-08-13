@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/cp-build-dev-ops/command-center-reboot/security/advisories/new
+    about: Report a security vulnerability privately

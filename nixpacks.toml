@@ -1,0 +1,14 @@
+# This file is retained as a fallback but Railway uses the Dockerfile instead.
+# When a Dockerfile is present, Railway ignores nixpacks.toml entirely.
+#
+# History: nixpacks-1.40.0 resolves nodejs_22 to v22.11.0 (below Prisma 7's
+# minimum of 22.12+). The Dockerfile pins node:22.14.0-slim to avoid this.
+#
+# If the Dockerfile is ever removed:
+# - Do NOT re-add nodejs_22 to nixPkgs — it resolves to 22.11.0 in the
+#   pinned nixpkgs snapshot and breaks Prisma 7 / Vite 7.
+# - Set NIXPACKS_NODE_VERSION=22.14.0 in Railway env vars and let
+#   nixpacks auto-detect Node from .node-version.
+
+[phases.setup]
+nixPkgs = ["npm-9_x", "openssl"]

@@ -1,0 +1,234 @@
+name: Doc Update Check
+run-name: "Doc check — PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}"
+
+# When a PR changes API routes, the DB schema, or shared lib patterns,
+# check whether the matching contract/pack doc was also updated.
+# If not, add the `needs-doc-update` label so it's visible without blocking.
+# Strictness: label-only (chosen by team — not a merge blocker yet).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  # PR comments are exposed via the Issues API (PRs are issues under the hood).
+  # The `gh api --method PATCH repos/.../issues/comments/...` call below needs
+  # `issues: write` to update comments in place; `pull-requests: write` alone
+  # covers the PR review endpoints but not general comment PATCH.
+  issues: write
+
+jobs:
+  check:
+    name: Check docs are current
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get changed files
+        id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          FILES=$(gh pr view "$PR" --repo "$REPO" --json files --jq '[.files[].path] | join("\n")')
+          echo "files<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FILES" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Check API contracts
+        id: api_check
+        env:
+          CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # Touched app/api/ but NOT docs/contracts/api-contracts.md?
+          if echo "$CHANGED" | grep -q "^app/api/" && \
+             ! echo "$CHANGED" | grep -qF "docs/contracts/api-contracts.md"; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "reason=API route changed but docs/contracts/api-contracts.md was not updated" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check DB contracts
+        id: db_check
+        env:
+          CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # Touched prisma/ but NOT docs/contracts/db-schema-notes.md?
+          if echo "$CHANGED" | grep -q "^prisma/" && \
+             ! echo "$CHANGED" | grep -qF "docs/contracts/db-schema-notes.md"; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Prisma schema/migration changed but docs/contracts/db-schema-notes.md was not updated" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check base pack
+        id: lib_check
+        env:
+          CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # Touched lib/ but NOT docs/packs/base-pack.md?
+          if echo "$CHANGED" | grep -q "^lib/" && \
+             ! echo "$CHANGED" | grep -qF "docs/packs/base-pack.md"; then
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # If a PR adds a new entry to COPILOT_LEARNINGS.md without also updating
+      # .cursor/rules/project-prompt.mdc (where the Pre-Push Self-Check table
+      # lives), flag it. A new learning entry that doesn't get codified into a
+      # proactive rule becomes a recurring surprise — exactly what the
+      # distillation loop is meant to prevent.
+      - name: Check pre-push rule update
+        id: prepush_check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          CHANGED: ${{ steps.files.outputs.files }}
+        run: |
+          # Quick path: if LEARNINGS wasn't touched, skip.
+          if ! echo "$CHANGED" | grep -qF "docs/COPILOT_LEARNINGS.md"; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Did the PR actually ADD a NET-NEW entry heading (not just fix
+          # whitespace, edit an existing heading, or comment on one)? If a user
+          # edits an existing entry heading (typo fix, date correction), git
+          # shows it as a removed `-###` line + added `+###` line. Counting
+          # only `^+###` would false-positive on that pattern and label the PR
+          # `needs-prepush-rule`. Subtract the removed count so only true net
+          # additions trigger the label.
+          #
+          # Capture stderr from `gh pr diff` to a tempfile. Silently swallowing
+          # stderr (`2>/dev/null || echo ""`) would turn any fetch failure
+          # (network blip, permissions, API outage) into an empty DIFF and a
+          # silent `needs_update=false` — a false negative we'd never notice.
+          # If the diff fetch fails, annotate the Actions UI with a warning
+          # and exit gracefully (needs_update=false is still the correct
+          # answer since we can't prove there's a new heading without the
+          # diff, but the warning makes the failure visible).
+          DIFF_ERR=$(mktemp)
+          if ! DIFF=$(gh pr diff "$PR" --repo "$REPO" -- docs/COPILOT_LEARNINGS.md 2>"$DIFF_ERR"); then
+            echo "::warning::gh pr diff failed for PR $PR — pre-push rule check skipped. stderr below:"
+            cat "$DIFF_ERR" >&2
+            rm -f "$DIFF_ERR"
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rm -f "$DIFF_ERR"
+          ADDED=$(echo "$DIFF" | grep -cE '^\+### [0-9]{4}-[0-9]{2}-[0-9]{2} \|' || true)
+          REMOVED=$(echo "$DIFF" | grep -cE '^\-### [0-9]{4}-[0-9]{2}-[0-9]{2} \|' || true)
+          NET_ADDED=$(( ADDED - REMOVED ))
+          if [ "$NET_ADDED" -lt 0 ]; then
+            NET_ADDED=0
+          fi
+
+          if [ "$NET_ADDED" -lt 1 ]; then
+            echo "No net-new learning headings (added=$ADDED, removed=$REMOVED) — skipping."
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Session retrospectives are process notes, not code-pattern lessons —
+          # they don't need a Pre-Push Self-Check row. Count retrospectives the
+          # same way (added minus removed) so pure edits to retrospective
+          # headings don't wrongly inflate the "actionable" count.
+          RETRO_ADDED=$(echo "$DIFF" | grep -cE '^\+### [0-9]{4}-[0-9]{2}-[0-9]{2} \| .*\| session retrospective' || true)
+          RETRO_REMOVED=$(echo "$DIFF" | grep -cE '^\-### [0-9]{4}-[0-9]{2}-[0-9]{2} \| .*\| session retrospective' || true)
+          NET_RETRO=$(( RETRO_ADDED - RETRO_REMOVED ))
+          if [ "$NET_RETRO" -lt 0 ]; then
+            NET_RETRO=0
+          fi
+          ACTIONABLE=$(( NET_ADDED - NET_RETRO ))
+          if [ "$ACTIONABLE" -lt 0 ]; then
+            ACTIONABLE=0
+          fi
+
+          if [ "$ACTIONABLE" -lt 1 ]; then
+            echo "All new LEARNINGS entries are session retrospectives (no pre-push rule needed)."
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Actionable entries added. Did the PR also touch project-prompt.mdc?
+          if echo "$CHANGED" | grep -qF ".cursor/rules/project-prompt.mdc"; then
+            echo "LEARNINGS entry added + project-prompt.mdc updated — good."
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "needs_update=true" >> "$GITHUB_OUTPUT"
+          echo "actionable=$ACTIONABLE" >> "$GITHUB_OUTPUT"
+
+      - name: Apply needs-doc-update label
+        if: |
+          steps.api_check.outputs.needs_update == 'true' ||
+          steps.db_check.outputs.needs_update == 'true' ||
+          steps.lib_check.outputs.needs_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          API_NEEDS: ${{ steps.api_check.outputs.needs_update }}
+          DB_NEEDS: ${{ steps.db_check.outputs.needs_update }}
+          LIB_NEEDS: ${{ steps.lib_check.outputs.needs_update }}
+        run: |
+          # Ensure label exists
+          gh label create "needs-doc-update" \
+            --color "f9d0c4" \
+            --description "Contracts or patterns changed — docs should be updated" \
+            --repo "$REPO" 2>/dev/null || true
+
+          gh pr edit "$PR" --repo "$REPO" --add-label "needs-doc-update" || true
+
+          # Build comment body
+          REASONS=""
+          [ "$API_NEEDS" = "true" ] && REASONS="${REASONS}- API route changed but \`docs/contracts/api-contracts.md\` was not updated\n"
+          [ "$DB_NEEDS"  = "true" ] && REASONS="${REASONS}- Prisma schema/migration changed but \`docs/contracts/db-schema-notes.md\` was not updated\n"
+          [ "$LIB_NEEDS" = "true" ] && REASONS="${REASONS}- \`lib/\` changed but \`docs/packs/base-pack.md\` was not updated\n"
+
+          BODY=$(printf '📋 **Doc update reminder** (label: `needs-doc-update`)\n\nThis PR touches shared contracts or patterns, but the matching doc was not updated:\n\n%b\nIf this change is intentional and the doc is already accurate, remove the label manually. If not, please update the doc and push.' "$REASONS")
+
+          # Check for existing comment to avoid duplication
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR}/comments" \
+            --jq '[.[] | select(.body | startswith("📋 **Doc update reminder**"))] | .[0].id // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" \
+              --field body="$BODY" > /dev/null || true
+          else
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY" || true
+          fi
+
+      - name: Apply needs-prepush-rule label
+        if: steps.prepush_check.outputs.needs_update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          ACTIONABLE: ${{ steps.prepush_check.outputs.actionable }}
+        run: |
+          gh label create "needs-prepush-rule" \
+            --color "e99695" \
+            --description "New LEARNINGS entry added without updating the Pre-Push Self-Check table" \
+            --repo "$REPO" 2>/dev/null || true
+
+          gh pr edit "$PR" --repo "$REPO" --add-label "needs-prepush-rule" || true
+
+          BODY=$(printf '🔁 **Pre-push rule reminder** (label: `needs-prepush-rule`)\n\nThis PR adds %s new actionable entry/entries to `docs/COPILOT_LEARNINGS.md` but does not update the Pre-Push Self-Check table in `.cursor/rules/project-prompt.mdc`.\n\nWhenever we document a new Copilot catch, we should also add (or reinforce) a proactive rule so the next agent catches it before pushing — otherwise the same pattern recurs. If this is intentional (e.g. a one-off the existing rules already cover, or a session retrospective that does not need a rule row), remove the label manually with one sentence of reasoning.' "$ACTIONABLE")
+
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR}/comments" \
+            --jq '[.[] | select(.body | startswith("🔁 **Pre-push rule reminder**"))] | .[0].id // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh api --method PATCH "repos/${REPO}/issues/comments/${EXISTING}" \
+              --field body="$BODY" > /dev/null || true
+          else
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY" || true
+          fi

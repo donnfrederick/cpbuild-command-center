@@ -1,0 +1,849 @@
+name: Track Copilot Rounds Metric
+
+# On every PR merge into `dev`, collect the full Copilot review history,
+# classify each comment as `preventable` (matches a category already in our
+# pre-push self-check rules — signal that discipline slipped) or `novel`
+# (signal that a new pattern needs to be captured), and append one JSON
+# record to docs/COPILOT_ROUNDS_METRICS.jsonl.
+#
+# The goal is recursive self-improvement visibility: if our self-check is
+# working, preventable_ratio should trend down over time and rounds-to-merge
+# should trend toward 1. If those numbers stay flat or rise, the problem is
+# not "loop more" — it's "tighten pre-push discipline" or "add a new
+# category to the self-check table."
+#
+# Not a blocking check. Writes to dev via an auto-PR opened by
+# `peter-evans/create-pull-request`, which auto-merges once CI passes.
+# We do NOT direct-push to dev — branch protection requires PRs + status
+# checks, and the previous direct-push implementation silently failed on
+# every merge (GH006 "Protected branch update failed"). Fixed on PR #682
+# (see `docs/COPILOT_LEARNINGS.md` entry 2026-04-17 — metrics-silent-fail).
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - dev
+
+# Skip when the merged PR is itself a metrics auto-PR. Without this guard
+# the workflow recurses on its own commits — each metrics merge would
+# trigger another metrics run, opening another metrics PR, and so on.
+# The `metrics-auto/*` branch prefix is the exact prefix the
+# `peter-evans/create-pull-request` step below writes to.
+permissions:
+  contents: write
+  pull-requests: write
+  # issues: write is used by the "Open or update retro follow-up issue"
+  # step below. It is scoped to this workflow only — no other step in
+  # this file creates or edits issues. If that step is ever removed,
+  # drop this permission too (principle of least privilege).
+  issues: write
+
+concurrency:
+  # Single shared group so only one workflow run at a time mutates the metrics
+  # log + dashboard + pushes to dev. If we keyed this per-PR, two PRs merging
+  # close together into dev could race and produce non-fast-forward push
+  # failures (and silently drop metric records). Serializing on a single group
+  # guarantees each merge gets appended cleanly.
+  group: track-copilot-rounds-dev
+  cancel-in-progress: false
+
+jobs:
+  track:
+    # Skip metrics auto-PRs to prevent recursion (the auto-PR opened
+    # by this workflow would otherwise trigger the workflow again on
+    # its own merge and spawn another PR, ad infinitum).
+    if: github.event.pull_request.merged == true && !startsWith(github.event.pull_request.head.ref, 'metrics-auto/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          # Need write perms via the default token to push the append
+          # commit. The token has `contents: write` via the permissions
+          # block above.
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Collect & classify Copilot review data
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          MERGED_AT: ${{ github.event.pull_request.merged_at }}
+        run: |
+          set -e
+
+          # Fetch all Copilot review submissions + all Copilot comment
+          # threads. One review == one "round" by definition (a round is
+          # a batch of comments Copilot submitted together).
+          # GraphQL caps `reviewThreads.first` at 100. For PRs with more than
+          # 100 threads we need cursor pagination — fetch all pages and merge.
+          # Per project-prompt.mdc Pre-Push Self-Check: always check
+          # totalCount and paginate if it exceeds the page size.
+          python3 <<'PYFETCH' > /tmp/pr_data.json
+          import json, os, subprocess, sys
+
+          repo = os.environ["REPO"]
+          owner, name = repo.split("/", 1)
+          pr = int(os.environ["PR"])
+
+          all_threads = []
+          reviews = []
+          cursor = None
+          total = None
+          pages = 0
+          # GraphQL caps `reviewThreads.first` at 100. Also cap `comments.first`
+          # at 50 per thread — Copilot rarely replies in-thread but humans might,
+          # and we want every Copilot-authored comment (not just the first one)
+          # so the classifier sees the full feedback surface. If a single thread
+          # exceeds 50 comments the workflow fails loudly rather than silently
+          # truncating the data. Raise the cap if we ever hit it in practice.
+          COMMENTS_PER_THREAD = 50
+          while True:
+              after = f', after: "{cursor}"' if cursor else ""
+              query = (
+                  "{ repository(owner: \"" + owner + "\", name: \"" + name + "\") { "
+                  "pullRequest(number: " + str(pr) + ") { "
+                  "reviews(first: 100) { totalCount nodes { author { login } submittedAt state body } } "
+                  "reviewThreads(first: 100" + after + ") { "
+                  "totalCount pageInfo { hasNextPage endCursor } "
+                  "nodes { isResolved "
+                  f"comments(first: {COMMENTS_PER_THREAD}) {{ "
+                  "totalCount nodes { author { login } createdAt body path line originalLine } "
+                  "} } "
+                  "} } } }"
+              )
+              res = subprocess.run(
+                  ["gh", "api", "graphql", "-f", f"query={query}"],
+                  capture_output=True, text=True, check=True,
+              )
+              data = json.loads(res.stdout)
+              if data.get("errors"):
+                  print("GraphQL errors:", data["errors"], file=sys.stderr)
+                  sys.exit(1)
+              pr_data = data["data"]["repository"]["pullRequest"]
+              if pages == 0:
+                  reviews = pr_data["reviews"]["nodes"]
+                  # Reviews are not paginated here — we ask for 100 on page 1
+                  # only. If a PR ever accumulates more than 100 reviews, the
+                  # rounds count (which uses len(reviews)) would silently
+                  # undercount. Fail loudly so we know to add review
+                  # pagination rather than keep writing wrong metrics.
+                  reviews_total = pr_data["reviews"]["totalCount"]
+                  if reviews_total > len(reviews):
+                      print(
+                          f"Reviews pagination not implemented, but totalCount "
+                          f"({reviews_total}) exceeds page size ({len(reviews)}). "
+                          "Failing to avoid undercounting rounds. Add cursor "
+                          "pagination for reviews(...) if this ever fires.",
+                          file=sys.stderr,
+                      )
+                      sys.exit(1)
+                  total = pr_data["reviewThreads"]["totalCount"]
+              all_threads.extend(pr_data["reviewThreads"]["nodes"])
+              info = pr_data["reviewThreads"]["pageInfo"]
+              if not info["hasNextPage"]:
+                  break
+              cursor = info["endCursor"]
+              pages += 1
+              if pages > 20:
+                  print(
+                      "Pagination safety cap hit (>20 pages). "
+                      "Failing to avoid recording partial Copilot review metrics.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+          # Sanity check: the total we read on page 1 should match the number
+          # of nodes we actually collected. If a later page returned fewer
+          # nodes than expected (API hiccup, race condition), we'd rather fail
+          # loudly than append a silently incomplete metric record.
+          if total is not None and len(all_threads) != total:
+              print(
+                  f"Thread count mismatch: totalCount={total} but collected "
+                  f"{len(all_threads)} thread nodes. Failing to avoid "
+                  "recording incomplete Copilot review metrics.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          # Per-thread comment pagination guard: if any thread has more
+          # comments than we fetched in a single page, the comment data is
+          # incomplete and the classifier would undercount. Raise
+          # COMMENTS_PER_THREAD (up to 100) or add per-thread pagination.
+          for t in all_threads:
+              c_total = (t.get("comments") or {}).get("totalCount") or 0
+              c_fetched = len((t.get("comments") or {}).get("nodes") or [])
+              if c_total > c_fetched:
+                  print(
+                      f"Comment count mismatch on a thread: totalCount={c_total} "
+                      f"but fetched {c_fetched}. Raise COMMENTS_PER_THREAD or "
+                      "implement per-thread pagination. Failing to avoid "
+                      "recording incomplete Copilot review metrics.",
+                      file=sys.stderr,
+                  )
+                  sys.exit(1)
+
+          print(json.dumps({
+              "data": {"repository": {"pullRequest": {
+                  "reviews": {"nodes": reviews},
+                  "reviewThreads": {"totalCount": total, "nodes": all_threads},
+              }}}
+          }))
+          PYFETCH
+
+          python3 <<'PY' > /tmp/metric_record.json
+          import json, os, re
+
+          pr = int(os.environ["PR"])
+          title = os.environ.get("PR_TITLE", "")
+          merged_at = os.environ.get("MERGED_AT", "")
+          data = json.load(open("/tmp/pr_data.json"))
+
+          pr_data = data["data"]["repository"]["pullRequest"]
+
+          # Copilot has been observed in this repo under several login
+          # identities depending on where the review comes from. Keep this
+          # set in sync with `.github/workflows/copilot-implement-suggestions.yml`
+          # — if a new identity appears on a future review, the rounds count
+          # will silently drop to 0 for that PR until this set is updated.
+          COPILOT_LOGINS = {
+              "copilot-pull-request-reviewer",
+              "copilot-pull-request-reviewer[bot]",
+              "github-copilot[bot]",
+              "copilot",
+          }
+
+          def is_copilot(author_obj):
+              login = (author_obj or {}).get("login") or ""
+              return login in COPILOT_LOGINS
+
+          # Count Copilot reviews = rounds.
+          reviews = [r for r in pr_data["reviews"]["nodes"]
+                     if is_copilot(r.get("author"))]
+          rounds = len(reviews)
+
+          # Every Copilot-authored comment across every review thread. A thread
+          # can contain multiple Copilot comments when Copilot replies to the
+          # agent's response to the initial comment — we want the classifier
+          # to see the full Copilot feedback surface, not just the opening
+          # comment. Non-Copilot replies (Phil, the agent itself) are
+          # intentionally excluded from the metric.
+          threads = pr_data["reviewThreads"]["nodes"]
+          copilot_comments = []
+          for t in threads:
+              nodes = (t.get("comments") or {}).get("nodes") or []
+              for c in nodes:
+                  if not is_copilot(c.get("author")):
+                      continue
+                  # path/line are thread-comment-only (review bodies don't
+                  # have them). Keep them in the record so the downstream
+                  # retro-issue step can render a "file:line" anchor per
+                  # bullet without re-querying GraphQL.
+                  copilot_comments.append({
+                      "created_at": c.get("createdAt", ""),
+                      "body": c.get("body", ""),
+                      "path": c.get("path") or "",
+                      "line": c.get("line") or c.get("originalLine") or None,
+                  })
+
+          # Also include review-level body text. A Copilot review can have a
+          # non-empty top-level `body` (the overall review summary) that is
+          # NOT a thread comment. Treating only thread comments would
+          # undercount both total_comments and novel snippets. Use the review's
+          # `submittedAt` as the timestamp for per-round bucketing.
+          for r in reviews:
+              body = (r.get("body") or "").strip()
+              if not body:
+                  continue
+              copilot_comments.append({
+                  "created_at": r.get("submittedAt", ""),
+                  "body": body,
+                  "path": "",
+                  "line": None,
+              })
+
+          total_comments = len(copilot_comments)
+
+          # --- Classification ---
+          # Each pattern is a list of regex snippets. If ANY matches the
+          # comment body (case-insensitive), the comment is classified as
+          # `preventable` under that category. The categories mirror the
+          # top-3 in session-checklist.md and the rows in
+          # project-prompt.mdc Pre-Push Self-Check. Add patterns here as
+          # new categories land in those rules.
+          # v1 classifier — conservative by design. Regex patterns should be
+          # specific enough to avoid false positives (matching a keyword that
+          # appears incidentally in a comment body that is NOT actually about
+          # that category). If you add a pattern, test it against the actual
+          # comment bodies on past PRs via the spot-check script before
+          # committing. The classifier lives entirely in this workflow's
+          # embedded `<<'PY'` block (CATEGORY_PATTERNS + classify()) — it is
+          # NOT in scripts/render-copilot-dashboard.py (that script only
+          # renders the JSONL into Markdown). To iterate locally, copy this
+          # block into a scratch file and feed it real comment bodies.
+          CATEGORY_PATTERNS = {
+              "i18n": [
+                  r"\bi18n\b",
+                  r"\btranslat(ion|ed|ing)\b",
+                  r"messages/(en|es)\.json",
+                  r"hardcoded (english|string)",
+                  r"useTranslations",
+                  r"getTranslations",
+                  r"\baria-label=",
+                  r"user[- ]visible.*(string|message|error|text)",
+              ],
+              "logging": [
+                  r"\bconsole\.(log|debug|warn|error)\b",
+                  r"logger\.",
+                  r"log.*PII",
+                  r"logs? (user data|emails|passwords)",
+              ],
+              "testing/fixtures": [
+                  r"\btest fixture\b",
+                  r"null(able)? field",
+                  r"empty .*fixture",
+                  r"integration test.*fixture",
+              ],
+              "testing/assertions": [
+                  r"mock\.calls\[",
+                  r"assert.*before",
+                  r"missing (assertion|expect)",
+                  r"\bstub(bed|bing|Global)\b.*(URL|prototype)",
+              ],
+              "security/guards": [
+                  r"requireDevToolsAdmin",
+                  r"\bhasPermission\b",
+                  r"missing auth(entication|orization)?",
+                  r"permission (check|guard)",
+                  r"\ballowlist\b",
+              ],
+              "typescript/types": [
+                  r"Record<string,\s*unknown>",
+                  r"\bany\b.*type",
+                  r"type annotation",
+                  r"explicit type",
+                  r"\bas\s+any\b",
+              ],
+              "css-tokens": [
+                  r"hardcoded (color|hex|rgba)",
+                  r"#[0-9a-f]{3,6}\b.*(color|token)",
+                  r"should use var\(--",
+              ],
+              "shell/safety": [
+                  r"grep -Fq",
+                  r"backtick",
+                  r"em[- ]dash",
+                  r"printf.*variable",
+                  r"shell injection",
+              ],
+              "github-actions/triggers": [
+                  r"trigger scope",
+                  r"pull_request.*instead",
+                  r"\bcheck_suite\b",
+                  r"\bcheck_run\b",
+              ],
+              "github-actions/dedup": [
+                  r"existing (comment|issue).*(before|first)",
+                  r"duplicate (comment|issue)",
+                  r"post.*comment.*twice",
+              ],
+              "github-actions/non-fatal": [
+                  r"non[- ]fatal",
+                  r"\bbash -e\b.*(fail|fatal)",
+                  r"swallow(ed|ing)? (errors|stderr)",
+                  r"silent(ly)? (fail|ignor|swallow)",
+              ],
+              "github-actions/output": [
+                  r"\$GITHUB_OUTPUT",
+                  r"step.*no `?id`?",
+                  r"output.*can.?t be consumed",
+              ],
+              "graphql/pagination": [
+                  r"totalCount",
+                  r"first:\s*\d+.*(paginat|totalCount|limit)",
+                  r"paginat(e|ion).*(first:|totalCount)",
+              ],
+              "prisma/transactions": [
+                  r"\$transaction",
+                  r"interactive transaction",
+                  r"PgBouncer",
+              ],
+              "docs/consistency": [
+                  r"contradict(s|ory|ion)",
+                  r"inconsisten(t|cy)",
+                  r"internally inconsistent",
+                  r"conflicting (instructions|guidance)",
+                  r"stale (version|anchor|reference|doc)",
+                  r"doesn.?t match.*(behavior|reality|implementation)",
+              ],
+              "docs/coordination": [
+                  r"ACTIVE_BRANCHES",
+                  r"PENDING_REMINDERS",
+                  r"session[- ]checklist",
+              ],
+          }
+
+          def classify(body: str):
+              """Return list of category names that matched the body."""
+              b = body.lower()
+              matched = []
+              for cat, patterns in CATEGORY_PATTERNS.items():
+                  for p in patterns:
+                      if re.search(p, b, flags=re.IGNORECASE):
+                          matched.append(cat)
+                          break
+              return matched
+
+          preventable = 0
+          novel = 0
+          novel_bodies = []
+          category_hits = {}
+
+          for c in copilot_comments:
+              cats = classify(c["body"])
+              if cats:
+                  preventable += 1
+                  for cat in cats:
+                      category_hits[cat] = category_hits.get(cat, 0) + 1
+              else:
+                  novel += 1
+                  # Keep a short excerpt so humans can review and decide
+                  # whether to add a new category pattern. Append an ellipsis
+                  # if truncation happened so the dashboard bullet doesn't
+                  # end mid-sentence (the renderer has its own sanitization
+                  # layer, but doing it here too keeps the JSONL honest on
+                  # its own — a consumer reading the JSONL directly also
+                  # sees the truncation marker).
+                  SNIPPET_LIMIT = 200
+                  normalized = re.sub(r"\s+", " ", c["body"]).strip()
+                  if len(normalized) > SNIPPET_LIMIT:
+                      snippet = normalized[: SNIPPET_LIMIT - 1].rstrip() + "\u2026"
+                  else:
+                      snippet = normalized
+                  novel_bodies.append(snippet)
+
+          preventable_ratio = round(preventable / total_comments, 2) if total_comments > 0 else None
+
+          # Bucketize comments by round (rough heuristic: attribute each
+          # comment to the earliest review submitted AFTER the comment
+          # was created).
+          review_times = sorted([r["submittedAt"] for r in reviews])
+          comments_by_round = [0] * rounds if rounds > 0 else []
+          if rounds > 0:
+              for c in copilot_comments:
+                  ct = c["created_at"]
+                  # Find the smallest review_time >= ct
+                  idx = 0
+                  for i, rt in enumerate(review_times):
+                      if rt >= ct:
+                          idx = i
+                          break
+                  else:
+                      idx = len(review_times) - 1
+                  comments_by_round[idx] += 1
+
+          record = {
+              "schema_version": 1,
+              "pr": pr,
+              "title": title,
+              "merged_at": merged_at,
+              "rounds": rounds,
+              "total_comments": total_comments,
+              "comments_by_round": comments_by_round,
+              "comments_preventable": preventable,
+              "comments_novel": novel,
+              "preventable_ratio": preventable_ratio,
+              "category_hits": category_hits,
+              "novel_comment_snippets": novel_bodies[:5],  # cap for readability
+              "classification_method": "automated-v1",
+          }
+
+          # Dump the full per-comment list (with path/line) to a sidecar file
+          # so the downstream retro-issue step can render a per-comment
+          # checklist without re-querying GraphQL. The metric record itself
+          # does NOT include this list — it's too large for the append-only
+          # log, and novel_comment_snippets already carries the "what's new"
+          # signal.
+          with open("/tmp/copilot_comments.json", "w", encoding="utf-8") as f:
+              json.dump(copilot_comments, f, ensure_ascii=False)
+
+          print(json.dumps(record, separators=(",", ":")))
+          PY
+
+          cat /tmp/metric_record.json
+
+      - name: Append record to metrics log
+        run: |
+          set -e
+          RECORD=$(cat /tmp/metric_record.json)
+          # Validate it's valid JSON before appending.
+          echo "$RECORD" | python3 -c "import json,sys; json.loads(sys.stdin.read())"
+
+          # Idempotency: if a record for this PR already exists, skip.
+          PR=${{ github.event.pull_request.number }}
+          if [ -f docs/COPILOT_ROUNDS_METRICS.jsonl ] && \
+             grep -qE "\"pr\":${PR}(,|})" docs/COPILOT_ROUNDS_METRICS.jsonl; then
+            echo "Record for PR $PR already present — skipping append."
+            exit 0
+          fi
+
+          echo "$RECORD" >> docs/COPILOT_ROUNDS_METRICS.jsonl
+
+      - name: Regenerate human-readable dashboard
+        run: |
+          python3 scripts/render-copilot-dashboard.py \
+            docs/COPILOT_ROUNDS_METRICS.jsonl \
+            docs/agent-context/copilot-rounds-dashboard.md
+
+      # Open or update a GitHub Issue tagged `agent-action-required` +
+      # `copilot-retro` whenever this merge had a meaningful Copilot review
+      # loop (>= 2 rounds). The issue is the forcing function for the
+      # retrospective: on the next agent session, it's surfaced by the
+      # session-start `agent-action-required` scan and the agent opens a
+      # retro PR (themed entries to COPILOT_LEARNINGS.md + new Pre-Push
+      # Self-Check rows) BEFORE starting new feature work — so the retro
+      # pattern stops depending on Phil remembering to ask. If an issue
+      # for this PR already exists (re-run of the workflow after a
+      # force-push, or the rare case of the same PR number getting
+      # re-opened), we update it in place rather than create a duplicate.
+      #
+      # This step runs BEFORE the metrics-PR step so that the retro issue
+      # (the forcing function for the next session) is created even if
+      # the metrics auto-PR step fails for any reason. The metric record
+      # lives in /tmp/metric_record.json which is already written by the
+      # earlier "Collect & classify" step, so this step does not depend
+      # on the metrics commit having landed on dev.
+      #
+      # Skip conditions:
+      #   - rounds < 2 (clean first-pass merges don't need a retro)
+      #   - Dependabot PRs (no repo-authored code to distill from)
+      #   - Release PRs (release/* branches are exempt from Copilot review
+      #     under the release-PR exception — no review history to distill)
+      - name: Open or update retro follow-up issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -e
+
+          # Ensure the labels we'll attach exist. Idempotent — silently
+          # no-ops if the label already exists. We use single labels
+          # (not per-PR) to avoid label-list explosion; dedup is by title
+          # search below.
+          gh label create copilot-retro \
+            --color 0e8a16 \
+            --description "Automated retrospective tracker — agent opens a retro PR distilling LEARNINGS + Pre-Push rules" \
+            --repo "$REPO" 2>/dev/null || true
+          gh label create agent-action-required \
+            --color b60205 \
+            --description "Agent session-start must handle this before starting new work" \
+            --repo "$REPO" 2>/dev/null || true
+
+          python3 <<'PY' > /tmp/retro_plan.json
+          import json, os, re
+
+          record = json.load(open("/tmp/metric_record.json", encoding="utf-8"))
+          comments = json.load(open("/tmp/copilot_comments.json", encoding="utf-8"))
+
+          pr = record["pr"]
+          rounds = record["rounds"]
+          author = os.environ.get("PR_AUTHOR", "")
+          head_ref = os.environ.get("PR_HEAD_REF", "")
+
+          # --- skip rules ---
+          # Keep the thresholds and the skip reasons explicit so a future
+          # reader can see exactly why an expected retro was or wasn't
+          # opened. If you tune these, update docs/agent-context/
+          # copilot-rounds-dashboard.md (and the LEARNINGS entry that
+          # documents the automation) so the rationale stays in sync.
+          reason = None
+          if rounds < 2:
+              reason = f"rounds={rounds} < 2 (clean first-pass merge)"
+          elif author.lower().startswith("dependabot"):
+              reason = f"Dependabot PR (author={author})"
+          elif head_ref.startswith("release/"):
+              reason = f"release PR (head_ref={head_ref})"
+
+          if reason:
+              # Single writer: print the plan JSON to stdout, let the
+              # shell `> /tmp/retro_plan.json` redirect be the only thing
+              # that creates the file. Writing the file from inside
+              # Python AND redirecting stdout to the same path results in
+              # interleaved/corrupted JSON — caught on PR #677 (Copilot).
+              print(json.dumps({"skip": True, "reason": reason}))
+              raise SystemExit(0)
+
+          # --- sanitize comments for Markdown body ---
+          # Same pattern as scripts/render-copilot-dashboard.py::sanitize_snippet:
+          # collapse whitespace, pad-replace code fences with a plain-text
+          # token, re-collapse, truncate with ellipsis, escape table
+          # control chars. The issue body is Markdown but we still escape
+          # pipes/backslashes in case a future template renders these
+          # inside a table. Keep in sync with the renderer.
+          SNIPPET_LIMIT = 220
+
+          def sanitize_markdown(s: str) -> str:
+              """For strings rendered inside the issue BODY (Markdown)."""
+              if not s:
+                  return ""
+              s = re.sub(r"\s+", " ", s).strip()
+              s = re.sub(r"`{3,}", " [code block] ", s)
+              s = re.sub(r"\s+", " ", s).strip()
+              if len(s) > SNIPPET_LIMIT:
+                  s = s[: SNIPPET_LIMIT - 1].rstrip() + "\u2026"
+              s = s.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
+              return s
+
+          def normalize_title(s: str) -> str:
+              """For strings rendered in the issue TITLE (plain text, NOT
+              Markdown). GitHub shows issue titles literally, so Markdown
+              escaping (backslashes before pipes/backticks) would produce
+              visible backslashes in the UI and in `gh issue list` output.
+              Collapse whitespace and strip backticks/newlines so the
+              title stays single-line; do NOT escape control chars."""
+              if not s:
+                  return ""
+              s = re.sub(r"\s+", " ", s).strip()
+              s = s.replace("`", "")
+              return s
+
+          # Render one checkbox per Copilot comment. Include path:line when
+          # available (thread comments do; review-level bodies don't).
+          checklist_lines = []
+          for c in comments:
+              body = sanitize_markdown(c.get("body", ""))
+              path = c.get("path") or ""
+              line = c.get("line")
+              if path and line:
+                  anchor = f"`{path}:L{line}`"
+              elif path:
+                  anchor = f"`{path}`"
+              else:
+                  anchor = "_(review-level body)_"
+              checklist_lines.append(f"- [ ] {anchor} — {body}")
+
+          category_hits = record.get("category_hits") or {}
+          if category_hits:
+              cats = ", ".join(
+                  f"`{k}={v}`" for k, v in sorted(category_hits.items(), key=lambda kv: -kv[1])
+              )
+          else:
+              cats = "_(none — all comments classified as novel)_"
+
+          # Title shape matters for dedup: the downstream search looks for
+          # `"PR #<N>"` in the issue title. Do NOT remove that exact
+          # substring without also updating the dedup query below.
+          pr_title_normalized = normalize_title(os.environ.get("PR_TITLE", ""))
+          title = f"Retro: distill learnings from PR #{pr} — {pr_title_normalized}"
+          # GitHub issue titles are capped at 256 chars. If a PR title is
+          # exceptionally long, truncate the combined title so the issue
+          # can be created at all. Leave room for the ellipsis marker.
+          if len(title) > 250:
+              title = title[:249].rstrip() + "\u2026"
+
+          pr_url = os.environ.get("PR_HTML_URL", "")
+
+          # Build the issue body as a list of lines and join. This avoids
+          # triple-quoted multi-line strings that would need their content
+          # at column 0 (which terminates the enclosing YAML `run: |`
+          # block scalar). Every line here is indented in the Python
+          # source, so the YAML parser sees a continuous block scalar.
+          total = record["total_comments"]
+          ratio = record.get("preventable_ratio")
+          checklist_block = (
+              "\n".join(checklist_lines)
+              if checklist_lines
+              else "_(no Copilot-authored comments were captured — check the workflow run if this seems wrong)_"
+          )
+          lines = [
+              f"# Copilot Review Retrospective — PR #{pr}",
+              "",
+              f"**Original PR:** {pr_url}",
+              f"**Rounds:** {rounds}  |  **Total comments:** {total}  |  **Preventable ratio:** {ratio}",
+              f"**Category hits:** {cats}",
+              "",
+              "## Why this issue exists",
+              "",
+              "`.github/workflows/track-copilot-rounds.yml` opens a retrospective tracker automatically whenever a merged PR has `rounds >= 2` — i.e., Copilot came back with a second round of comments. That's the threshold where distilling the root cause into a rule becomes high-leverage: the same pattern has already recurred once within a single PR, so without a rule it will recur on the next PR too.",
+              "",
+              "## Task for the next agent session",
+              "",
+              "On the next agent session, the session-start `agent-action-required` scan will surface this issue. The agent must handle it **before** starting new feature work:",
+              "",
+              "1. Read the Copilot comment list below.",
+              "2. Group them by recurring root cause (not one entry per comment — themed entries).",
+              "3. Open a retro PR (see [PR #677](https://github.com/cp-build-dev-ops/command-center-reboot/pull/677) for the format) that adds:",
+              "   - Themed entries to `docs/COPILOT_LEARNINGS.md`, each listing the specific Copilot comments it covers.",
+              "   - New Pre-Push Self-Check rows in `.cursor/rules/project-prompt.mdc` for any pattern that doesn't already have one.",
+              "   - If a regression is testable (e.g. a guard on a workflow, a unit invariant), add a small test so the rule is enforced by CI rather than agent memory.",
+              "4. Close this issue via `Closes #<this-issue-number>` in the retro PR body.",
+              "",
+              "## Copilot comments to distill",
+              "",
+              checklist_block,
+              "",
+              "---",
+              "",
+              "<sub>Auto-generated by `.github/workflows/track-copilot-rounds.yml`. If the classification thresholds need tuning, edit that workflow's `retro_plan` Python block and document the change in `docs/COPILOT_LEARNINGS.md`.</sub>",
+              "",
+          ]
+          body = "\n".join(lines)
+
+          # Single writer: one print that emits the full plan JSON to
+          # stdout. The shell `> /tmp/retro_plan.json` redirect captures
+          # it. Do NOT also `json.dump(..., open("/tmp/retro_plan.json",
+          # "w"))` — that creates two concurrent writers to the same
+          # file and corrupts the JSON (caught on PR #677 by Copilot).
+          print(
+              json.dumps(
+                  {
+                      "skip": False,
+                      "reason": "",
+                      "title": title,
+                      "body": body,
+                  },
+                  ensure_ascii=False,
+              )
+          )
+          PY
+
+          # If the plan said skip, we're done.
+          if [ "$(jq -r '.skip' < /tmp/retro_plan.json)" = "true" ]; then
+            REASON=$(jq -r '.reason' < /tmp/retro_plan.json)
+            echo "Skipping retro issue for PR #${PR}: ${REASON}"
+            exit 0
+          fi
+
+          TITLE=$(jq -r '.title' < /tmp/retro_plan.json)
+          jq -r '.body' < /tmp/retro_plan.json > /tmp/retro_body.md
+
+          # Dedup: look for an existing open issue with label copilot-retro
+          # whose title contains the exact fragment "PR #<N> " (with the
+          # trailing space from the title template:
+          # `Retro: distill learnings from PR #<N> — <normalized title>`).
+          # GitHub's `in:title` search tokenises on word boundaries so
+          # `"PR #67"` will match a title containing `PR #677`. To prevent
+          # prefix matches (e.g. search for PR 67 matching issue for
+          # PR 677) we fetch candidate matches and then post-filter with
+          # jq's `test()` against the exact `PR #<N> —` fragment.
+          # Using `--search "in:title"` rather than label filtering alone
+          # because we intentionally don't create per-PR labels (would
+          # explode the label list). If a match is found, update in place;
+          # otherwise create.
+          # NOTE: `gh --jq` takes exactly ONE argument (the expression).
+          # Unlike the `jq` CLI, it does NOT accept `--arg`. Interpolate
+          # the PR number directly into the expression using shell quoting.
+          # (Caught by Copilot on PR #677 round 6 — the previous version
+          # with `--jq --arg pr "${PR}" ...` failed at runtime with
+          # `accepts 1 arg(s), received 4`.)
+          EXISTING=$(gh issue list \
+            --repo "$REPO" \
+            --label copilot-retro \
+            --state open \
+            --search "\"PR #${PR}\" in:title" \
+            --json number,title \
+            --jq '[.[] | select(.title | test("PR #'"${PR}"'( —| $|$)"))] | .[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Updating existing retro issue #${EXISTING} for PR #${PR}"
+            gh issue edit "$EXISTING" \
+              --repo "$REPO" \
+              --title "$TITLE" \
+              --body-file /tmp/retro_body.md
+          else
+            echo "Creating new retro issue for PR #${PR}"
+            gh issue create \
+              --repo "$REPO" \
+              --title "$TITLE" \
+              --body-file /tmp/retro_body.md \
+              --label agent-action-required \
+              --label copilot-retro
+          fi
+
+      # Open (or update) a rolling auto-PR carrying the metrics append
+      # + dashboard regeneration. We cannot direct-push to dev — branch
+      # protection requires PRs + status checks and rejected the previous
+      # direct push with GH006 on every merge (silently broken since the
+      # protection was tightened; caught on PR #677's merge).
+      #
+      # Single rolling branch (`metrics-auto/update`), NOT per-PR branch:
+      # if we opened `metrics-auto/pr-<N>` per merge, multiple auto-PRs
+      # could be open simultaneously. Each one regenerates the dashboard
+      # from a snapshot of `dev` that doesn't include the other pending
+      # auto-PRs' records — so the last-merged auto-PR would overwrite
+      # the dashboard with stale content and silently drop metric rows.
+      # Using one rolling branch means every run updates the same
+      # branch/PR in place; peter-evans re-uses the existing PR and the
+      # commit history accumulates until the PR merges. (Caught by
+      # Copilot on PR #682 round 1.)
+      #
+      # peter-evans/create-pull-request handles:
+      #   - creating the `metrics-auto/update` branch on first run,
+      #     updating it on subsequent runs
+      #   - pushing the metrics commit onto that branch
+      #   - opening (or updating) the single open PR to dev
+      #   - idempotency: re-running produces no duplicate PR
+      #
+      # The `if:` recursion guard on the `track` job above skips this
+      # workflow when `metrics-auto/*` PRs themselves merge.
+      - name: Ensure metrics-auto label exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -e
+          gh label create metrics-auto \
+            --color c2e0c6 \
+            --description "Auto-PR opened by track-copilot-rounds.yml — safe to auto-merge (docs-only)" \
+            --repo "$REPO" 2>/dev/null || true
+
+      - name: Open/update rolling auto-PR with metrics commit
+        id: metrics_pr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          commit-message: "chore(metrics): record Copilot rounds for PR #${{ github.event.pull_request.number }}"
+          branch: metrics-auto/update
+          base: dev
+          title: "chore(metrics): update Copilot rounds metrics"
+          body: |
+            Auto-generated by `.github/workflows/track-copilot-rounds.yml` — rolling metrics PR. Every merge into `dev` that produces new Copilot review data appends to this branch (most recent append was after #${{ github.event.pull_request.number }}).
+
+            **Changes (docs-only):**
+            - Appends one JSON record per merged PR to `docs/COPILOT_ROUNDS_METRICS.jsonl`
+            - Regenerates `docs/agent-context/copilot-rounds-dashboard.md`
+
+            **Why this is a rolling PR (not per-merge):**
+            Using one branch per merged PR (e.g. `metrics-auto/pr-<N>`) can produce multiple simultaneously-open metrics PRs that regenerate the dashboard from snapshots of `dev` that don't include each other's data — causing the last-merged auto-PR to silently drop metric rows. A single rolling branch has each run update the same PR in place; the commit history accumulates until the PR merges. Caught by Copilot on PR #682 round 1.
+
+            **Why this is a PR, not a direct push:**
+            Branch protection on `dev` requires PRs + passing status checks. The previous implementation direct-pushed and silently failed on every merge (GH006). See `docs/COPILOT_LEARNINGS.md` → `metrics-silent-fail`.
+
+            Safe to auto-merge once CI is green.
+          labels: |
+            metrics-auto
+            chore
+          add-paths: |
+            docs/COPILOT_ROUNDS_METRICS.jsonl
+            docs/agent-context/copilot-rounds-dashboard.md
+          delete-branch: true
+
+      - name: Enable auto-merge on the metrics PR
+        if: steps.metrics_pr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.metrics_pr.outputs.pull-request-number }}
+        run: |
+          set -e
+          echo "Enabling auto-merge on metrics PR #${PR_NUMBER}"
+          gh pr merge "$PR_NUMBER" \
+            --repo "$REPO" \
+            --squash --auto

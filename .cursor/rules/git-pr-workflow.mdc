@@ -1,0 +1,1136 @@
+---
+description: Git workflow — branch naming, rebase, and PR process for the whole team
+alwaysApply: true
+---
+
+# Git & PR Workflow — CP Build Command Center
+
+This file is shared with the team via the repo. Every contributor (Phil, Hannah, and the dev team) follows these rules. AI agents working in this repo must also follow them.
+
+## Branch Naming
+
+| Who | Pattern | Example |
+|-----|---------|---------|
+| Phil (backend / full-stack) | `feat/short-description` or `fix/short-description` | `feat/unifier-mock-mode` |
+| Hannah (design / UI) | `hannah/feature-name` | `hannah/units-page` |
+| RAD devs | `feat/short-description`, `fix/short-description`, `chore/short-description` | `fix/offline-sync-conflict` |
+
+Keep branches focused on one feature or fix. Do not bundle unrelated changes.
+
+## When the Prod Build is Broken (Railway deploy failure)
+
+**Do this before writing a single line of fix code.** Jumping straight to fixes without diagnosing first is how commits end up on the wrong branch.
+
+### Step 1 — Diagnose first
+
+```bash
+# What is currently deployed to prod?
+git log origin/main --oneline -5
+
+# What is in dev that isn't in prod yet?
+git log origin/dev --oneline --not origin/main | head -20
+
+# What files are different between dev and main right now?
+git diff origin/main..origin/dev --name-only | head -30
+
+# Does the failing file even exist on dev?
+git show origin/dev:path/to/failing/file.ts 2>&1 | head -5
+```
+
+Answer these questions before doing anything:
+- Which branch does the failing code live on? (`main`? An unmerged feature branch?)
+- Is the fix needed in `dev` (because `dev` has the broken file too), or only in `main` (because the file was introduced by the last release)?
+- Is the thing Phil wants to deploy already in `main` but blocked by the build error, or is it still sitting in `dev`?
+
+### Step 2 — Create the fix branch from the right base
+
+The fix branch **always** comes from `origin/dev`:
+
+```bash
+git checkout -b fix/describe-the-fix origin/dev
+```
+
+Never branch from `main` to fix a prod build error. The fix must go through `dev` first.
+
+### Step 3 — Apply the minimum fix
+
+Fix only what is broken. Do not bundle unrelated changes. Do not include files you did not intentionally edit.
+
+### Step 4 — Verify clean working tree before committing
+
+```bash
+git status --short   # must show ONLY the files you intentionally changed
+git diff --stat      # review every file in the diff
+```
+
+If untracked or unrelated files appear, stash or discard them before committing:
+```bash
+git stash push --include-untracked -- path/to/unrelated/file
+```
+
+### Step 5 — Open PR to `dev`, merge, then release to `main`
+
+See The Golden Rule and Production Deployment sections below.
+
+---
+
+## Branch Hygiene — Required Before Every Branch Operation
+
+Run `git status --short` before:
+- Creating a new branch (`git checkout -b`)
+- Switching branches (`git checkout`)
+- Running `git add`
+
+**If the working tree is not clean**, stash or discard changes before proceeding. Switching branches with a dirty working tree is how unrelated files end up in the wrong commit.
+
+```bash
+git status --short          # should be empty before switching
+git stash push -u -m "wip" # if it's not empty and you need to switch
+```
+
+**Feature work base branch:** Before committing application or test changes, confirm `git branch --show-current` is `feat/*`, `fix/*`, `chore/*`, or `dev` — not `release/*` or `main`. Starting feature commits on `release/to-prod` forces stash/recovery and risks landing changes on the wrong branch.
+
+---
+
+## Branch Conflict Check — Required Before Starting Any Branch
+
+Before creating a new branch, every agent must:
+
+1. Read `docs/ACTIVE_BRANCHES.md` — scan the "Files owned" column for overlap with files you plan to touch
+2. Cross-reference open PRs: `gh pr list --repo cp-build-dev-ops/command-center-reboot --state open --json headRefName,title`
+3. If any active branch or open PR owns files you plan to touch, **surface the conflict to your user before proceeding**:
+
+```
+⚠️ Conflict: feat/other-branch (owner: Hannah) is currently touching components/tour/TourPlayer.tsx.
+Your work also needs that file. Options:
+  A) Wait for feat/other-branch to merge first
+  B) Coordinate with Hannah to split the changes
+  C) Proceed anyway — I'll document the overlap in ACTIVE_BRANCHES.md
+Which do you prefer?
+```
+
+Never silently edit a file another active branch owns. Always get a decision first.
+
+---
+
+## Before Every PR — Required Steps
+
+**Always rebase on `dev` before creating a new PR or pushing an update to an existing one.**
+
+```bash
+git fetch origin
+git rebase origin/dev
+# resolve any conflicts, then:
+git push --force-with-lease
+```
+
+Then run the quality gate:
+
+```bash
+npm run build       # must pass — no TypeScript errors
+npm run lint        # must pass — 0 errors (warnings OK)
+npm run test:unit   # must pass — all unit tests green
+```
+
+CI will block the PR if any of these fail, so run them locally first.
+
+## PR Checklist
+
+- [ ] Branch is rebased on `dev` (not behind)
+- [ ] `npm run build` passes
+- [ ] `npm run lint` passes (0 errors)
+- [ ] `npm run test:unit` passes
+- [ ] New code has a matching test file (see `.cursor/rules/testing.mdc`)
+- [ ] If a new `scripts/bootstrap-*.ts` was added → `scripts/railway-start.sh` is updated in this same PR
+- [ ] No secrets, credentials, or `.env` files committed
+- [ ] PR targets `dev` (not `main`)
+- [ ] `docs/ACTIVE_BRANCHES.md` updated with this branch while it is active
+- [ ] **`docs/ACTIVE_BRANCHES.md`:** delete this branch's row when the PR merges to `dev` — same session as merge, or last pre-merge commit on the branch so the merge carries the deletion (never leave merged feature branches listed here)
+- [ ] **If `prisma/migrations/` contains a new file**: add the `needs-migration` label and follow the Migration PR Protocol below
+
+## Migration PR Protocol
+
+Any PR that adds a file under `prisma/migrations/` must follow this extra protocol. The goal is to prevent users from ever seeing a live app with unapplied migrations.
+
+### Why this matters
+
+Railway uses zero-downtime deployments. When a new container starts, it runs `prisma migrate deploy` in `railway-start.sh` before `next start`. If the migration fails, the container now exits non-zero and Railway keeps the old container serving. But during the brief startup window before the health check passes, users could hit the old container running code that references tables that don't exist yet. The `/api/health` DB ping gates traffic on DB connectivity, but there is still a window if the migration completes but the tables have unexpected schema.
+
+**The safest guarantee is to verify the migration applied cleanly in dev before ever promoting to prod.**
+
+### Dev verification gate (required before opening the prod PR)
+
+After the PR merges to `dev` and the deploy completes:
+
+```bash
+# 1. Confirm the health check is 200 (DB + migration ran)
+curl -s https://command-center-reboot-dev.up.railway.app/api/health
+# Expected: {"status":"ok",...}  — NOT {"status":"error","reason":"db_unreachable"}
+
+# 2. Confirm the new table(s) actually exist by hitting an API route that uses them
+# e.g. for activity_logs:
+curl -s "https://command-center-reboot-dev.up.railway.app/api/projects/<any-project-id>/activity?limit=1" \
+  -H "Cookie: <your session cookie>" | python3 -m json.tool | head -5
+# Expected: JSON with "events" array — NOT {"error":"..."} with status 500
+```
+
+Only after both checks pass does Phil approve the prod PR.
+
+### Frontend/backend coordination rule
+
+If a PR introduces **both** a new DB table and UI that calls it, the UI must degrade gracefully if the API returns 500/503. This means:
+
+- The "Failed to load" message the user sees is acceptable as a loading state
+- The feature is not listed in release notes until verified in dev
+- Do NOT announce the feature to the team until the dev verification gate passes
+
+If the frontend complexity is high (many components touching the new table), consider splitting into:
+1. **Backend PR**: migration + API route only, no UI changes
+2. **Frontend PR**: UI changes, merged after backend is verified in dev
+
+Splitting is optional for small features but required if the feature has more than 2 API routes backed by new tables.
+
+## PR Labels
+
+| Label | When to use |
+|-------|-------------|
+| `design` | Hannah's UI/UX work — Phil will review and wire backend |
+| `backend` | API routes, database, auth, server-side logic |
+| `dependencies` | Dependency bumps (usually Dependabot) |
+| `security` | Security fixes or hardening |
+| `chore` | Maintenance, docs, config — no feature change |
+
+## Copilot Sub-PR Automation
+
+When `@copilot` addresses review comments it creates a **sub-PR** targeting your branch. When you merge that sub-PR, the automation in `.github/workflows/copilot-sub-pr-automation.yml` will:
+
+1. Auto-resolve all review threads on the parent PR
+2. Close any redundant Copilot sub-PRs
+
+**Your steps:** Merge one Copilot sub-PR → automation runs → verify all PR Ready steps pass → notify the user their PR is ready to merge.
+
+See `docs/COPILOT_PR_WORKFLOW.md` for full details.
+
+## What Needs Backend Wiring (Hannah → Phil handoff)
+
+When Hannah's UI needs an API or database change, add this to the PR description or the top of the component:
+
+```tsx
+// Backend needed: GET /api/units — list of units with status field
+```
+
+Phil will pick this up during review and create the backend work as a follow-up.
+
+---
+
+## How to Chunk PRs
+
+Before starting any multi-file feature, propose the PR breakdown to Phil first. Each PR must be:
+
+- **Independently deployable** — `dev` stays green and functional without the other PRs
+- **Scoped to one logical concern** — API, UI, migration, or config; not all four
+- **Ordered so dependencies merge first** — if PR B depends on PR A, A merges before B is opened
+
+### Typical split patterns
+
+| Feature type | PR split | Merge order |
+|---|---|---|
+| New data model + UI | Schema migration → API route → UI component | 1 → 2 → 3 |
+| Auth-protected feature | Auth guard / permission → protected route | 1 → 2 |
+| Config-gated feature | Env var / config change → feature that uses it | 1 → 2 |
+| UI-only change | Single PR with all component/style changes | — |
+| Bug fix | Single PR scoped to the broken code | — |
+
+### Before starting, tell Phil the plan
+
+```
+This feature needs 3 PRs in order:
+1. feat/schema-X — add `status` field to projects table
+2. feat/api-X — GET /api/projects returns status
+3. feat/ui-X — Projects page shows status badge
+
+Each can deploy independently. Want me to start with #1?
+```
+
+Phil confirms the breakdown, then work begins on PR 1.
+
+---
+
+## Merge Authority
+
+### The PR creation gate — applies to ALL agent types
+
+**Agents must NOT create a PR until the user explicitly approves it.**
+
+After pushing a branch and passing the quality gate, agents must:
+1. Update `docs/ACTIVE_BRANCHES.md` — set status to `pushed, awaiting local verify`
+2. Tell the user the branch is ready and ask: **"Ready for me to open the PR?"**
+
+The user verifies locally, then says yes (or words to that effect). Only then does the agent run `gh pr create`. The same gate applies before opening the dev → prod promotion PR.
+
+**Phil's explicit trigger phrases** (treat any of these as a "yes, create the PR"):
+- "create a PR", "open the PR", "go ahead with the PR", "ready for PR", "looks good, PR it", "ship it", "looks good"
+
+### Once the PR is open — agents run the full lifecycle autonomously
+
+After Phil approves PR creation, agents handle everything and only surface genuine blockers:
+
+1. **Every PR must run the full Copilot feedback loop before merge — two exceptions: release PRs and the active Copilot pause (see "Release-PR exception" and "Copilot pause exception" in the Unified Checklist section below).** While `docs/PENDING_REMINDERS.md` → **Copilot pause protocol** is unchecked, **do not** request Copilot, wait for Copilot, or block merge on missing Copilot review — use the substitute checklist in that reminder instead. For all other periods, for feature / fix / chore / refactor PRs — regardless of tier — the full loop runs.
+   If Copilot has not reviewed yet, the `copilot-review.yml` workflow auto-requests Copilot on PR open and on every `synchronize` (push) event to path-filtered tiers (see "Copilot Auto-Review Setup" below). For pushes that miss the workflow's path filter — or if the workflow's step failed — the agent re-requests manually using `gh pr edit <N> --add-reviewer "@copilot"` (GraphQL-backed, gh ≥ 2.88). **Never use** the dead REST endpoint `POST .../requested_reviewers -f reviewers[]=copilot`: it returns 200 OK but silently no-ops since 2026-04-17 (see `docs/COPILOT_LEARNINGS.md` 2026-04-17 entry). See "Copilot Auto-Review Setup" below for the exact commands and the narrow skip list (truly empty / whitespace-only / lone version-bump commits). After each re-request, verify `requested_reviewers` shows `["Copilot"]`, then wait for Copilot's new review, process any net-new comments, and loop until one of the following exit conditions is met:
+   - Copilot's latest review produces **zero net-new unresolved comments**, OR
+   - Every net-new comment on the latest review is either fixed and resolved, or skipped with documented reasoning using one of the valid skip patterns (see "Always document skip reasoning" below), OR
+   - The **3-round cap** is reached (see "Round cap — 3 iterations" below).
+
+   Tier only affects **how** the agent engages with each comment, not **whether** the loop runs:
+   - **Security tier** (touches `lib/auth.ts`, `lib/permissions.ts`, `lib/dev-session.ts`, `proxy.ts`, `prisma/schema.prisma`, `.github/workflows/**`): implement or escalate every comment. Use the decision framework conservatively — default to "implement" unless the skip criterion is airtight.
+   - **Medium-risk tier** (touches `app/api/**`, `lib/**`, `prisma/migrations/**`, `components/**`) and **standard PRs** (neither of the above): use the decision framework (implement real bugs, skip only with one of the valid documented reasons). Log every implemented comment to `COPILOT_LEARNINGS.md`.
+2. Auto-merge when all safe-to-merge conditions pass
+3. Verify the dev deploy, then tell Phil: "Merged and deployed to dev. Verify when ready — say the word and I'll open the prod PR."
+4. Wait for Phil to verify in dev and approve before opening the prod PR
+5. Open the prod PR, merge it, verify the production health endpoint
+6. Tell Phil: "Deployed to prod. Health check: 200 OK."
+
+### Dependabot PRs (author login contains `dependabot`)
+
+Agents are authorized to **auto-merge Dependabot PRs** once all safe-to-merge conditions pass. Dependabot auto-merge is **not** enabled at the repo level, so these PRs will otherwise sit open indefinitely.
+
+**During the session-start checklist:** scan for any open Dependabot PRs. If CI is green, threads are zero, and no security-sensitive files are touched, enable auto-merge immediately:
+```bash
+gh pr merge <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot --squash --auto
+```
+
+The `Auto-Merge Ready PRs` workflow handles Dependabot PRs through the same safety gates (CI green, no security-sensitive files, no merge conflicts). A new CI run may be triggered when auto-merge is enabled — this is expected under `strict: true` branch protection and resolves automatically.
+
+**Race condition when merging Dependabot PRs and opening a feature branch in the same session:**
+If you merge Dependabot PRs at session start (with `--auto`) and then create and push a feature branch in the same session, those Dependabot commits may land on `dev` while your feature CI is still running — leaving your branch `BEHIND` and blocking auto-merge. To prevent this: immediately after opening any feature PR in the same session as Dependabot merges, run:
+
+```bash
+gh pr update-branch <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot
+```
+
+Do this proactively before waiting for CI. It is harmless if the branch is already current.
+
+### Contributor PRs (Hannah or any other team member)
+
+**Phil personally reviews and merges all contributor PRs.** No agent may auto-merge a PR authored by a team member. Copilot reviews contributor PRs that touch security or medium-risk paths; agents may assist by addressing Copilot comments if asked — but the merge decision belongs to Phil.
+
+When a contributor PR is ready (CI green), post a notification and inform Phil in chat:
+```
+👤 PR #N by @username is ready for your review — [one sentence summary]. Link: [url]
+```
+
+### Safe-to-Auto-Merge Conditions (all must be true)
+
+| Condition | How to verify |
+|-----------|--------------|
+| User has approved PR creation | Said yes in chat for this specific PR |
+| CI green | `gh pr view <n> --json statusCheckRollup` — all `SUCCESS` or `NEUTRAL` |
+| Zero unresolved Copilot threads — **all PRs** | `required_conversation_resolution: true` is enabled repo-wide — unresolved threads block merge on every PR, not just security ones. Run the thread check below for every PR before enabling auto-merge. |
+| No merge conflicts | `gh pr view <n> --json mergeable` — `MERGEABLE` |
+| PR does NOT touch security-sensitive files | See list below |
+| PR does NOT modify `prisma/schema.prisma` | Schema changes need Phil's review |
+
+**Thread check — run before every auto-merge, regardless of PR tier:**
+
+```bash
+gh api graphql -f query='
+{
+  repository(owner: "cp-build-dev-ops", name: "command-center-reboot") {
+    pullRequest(number: PR_NUMBER) {
+      reviewThreads(first: 20) {
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes { body author { login } }
+          }
+        }
+      }
+    }
+  }
+}' --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | "UNRESOLVED [\(.id)]: \(.comments.nodes[0].author.login): \(.comments.nodes[0].body[:150])"'
+```
+
+If any unresolved threads are returned: address each one (fix in code or document the skip reason), then resolve:
+
+```bash
+gh api graphql -f query="mutation { resolveReviewThread(input: { threadId: \"THREAD_ID\" }) { thread { isResolved } } }"
+```
+
+Only proceed to auto-merge once this query returns no output.
+
+### Security-Sensitive Files — Require Phil's Review (unless he explicitly approves)
+
+If a PR modifies any of these, **do not auto-merge — notify Phil instead**:
+- `lib/auth.ts`, `lib/permissions.ts`, `proxy.ts`
+- `prisma/schema.prisma`
+- Any file containing `PERMISSIONS`, `hasPermission`, or `auth()`
+- `.github/workflows/deploy.yml` (production deployment config)
+- Any file that handles secrets or environment variables at runtime
+
+**Override:** If Phil explicitly says to merge/deploy (e.g. "go ahead and merge", "deploy it", "fully deploy to prod"), treat that as his sign-off on security-sensitive files for that specific PR.
+
+### How to Auto-Merge (after user has approved PR creation)
+
+**Before enabling auto-merge — always confirm the branch is current:**
+
+```bash
+gh pr view <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot \
+  --json mergeable,mergeStateStatus \
+  --jq '"mergeable:\(.mergeable) mergeStateStatus:\(.mergeStateStatus)"'
+```
+
+- If `mergeStateStatus: BEHIND` → run `gh pr update-branch` first, then **wait** and re-check until the state is no longer `BEHIND` before proceeding. Do NOT enable auto-merge on a BEHIND branch — the merge may fire while the branch is still out of date.
+
+```bash
+gh pr update-branch <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot
+# Wait ~15-30s, then re-check mergeStateStatus before continuing
+```
+
+Once the branch is confirmed current (not BEHIND), enable auto-merge:
+
+```bash
+gh pr merge <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot --squash --auto
+```
+
+**Immediately after enabling auto-merge — re-check `mergeStateStatus`:**
+
+```bash
+gh pr view <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot \
+  --json mergeable,mergeStateStatus \
+  --jq '"mergeable:\(.mergeable) mergeStateStatus:\(.mergeStateStatus)"'
+```
+
+- `mergeStateStatus: CLEAN` → auto-merge will fire once CI passes. Proceed to poll for `state:MERGED`.
+- `mergeStateStatus: BEHIND` → branch fell behind again (another PR merged in the window). Run `gh pr update-branch` again and wait before re-checking. Do not enable auto-merge again until CLEAN.
+- `mergeStateStatus: BLOCKED` → CI is passing but something else is preventing merge. Work through this checklist in order:
+  1. **Unresolved threads** (most common) — run the thread check query above. If any `isResolved: false` entries exist, address and resolve them. This is the leading cause of `BLOCKED` after CI goes green.
+  2. **Required check still pending** — `gh pr view <n> --json statusCheckRollup` — look for any check with no `conclusion` (still running).
+  3. **Branch is stale post-update** — a `gh pr update-branch` merge commit can trigger a new required CI run. Check if `lint-and-test` needs to re-run.
+  4. **Required review missing** — `gh api repos/cp-build-dev-ops/command-center-reboot/branches/dev/protection --jq .required_pull_request_reviews.required_approving_review_count` — if non-zero, an approval is required.
+
+**Do not assume auto-merge will fire just because CI is green.** CI green + `BEHIND` = silently blocked. CI green + unresolved threads = silently blocked.
+
+**Always poll until `state:MERGED` is confirmed — not just until CI goes green:**
+
+```bash
+for i in $(seq 1 20); do
+  STATE=$(gh pr view <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot \
+    --json state,mergeCommit --jq '"state:\(.state) sha:\(.mergeCommit.oid // "pending")"')
+  echo "[$(date +"%l:%M:%S %p" | sed 's/^ //')] $STATE"
+  echo "$STATE" | grep -q "state:MERGED" && break
+  sleep 15
+done
+```
+
+Only transition to deploy polling after `state:MERGED` is confirmed. If the loop exits without MERGED, diagnose — never declare success based on CI green alone.
+
+### When to Interrupt Phil
+
+Only escalate when genuinely needed:
+- CI fails and you cannot diagnose/fix it after 2 attempts
+- Merge conflict you cannot resolve automatically
+- PR touches a security-sensitive file AND Phil has not explicitly approved
+- Architectural decision with two valid approaches and real trade-offs
+
+For everything else: handle it and report when done.
+
+---
+
+## Session Start Protocol — Phil's Agent Only
+
+**Phil's agent must run this at the start of any conversation** before taking on new work. This bridges the gap between sessions and ensures nothing falls through the cracks.
+
+> **RAD dev agents and Hannah's agent: skip this entire section.** Instead: read `docs/ACTIVE_BRANCHES.md` to check for file ownership conflicts, load the relevant `docs/agent-context/` files, and follow the contributor workflow in `CONTRIBUTING.md`.
+
+```bash
+# 1. Check for pending agent-action items (Copilot reviews, conflicts, CI failures)
+gh issue list --repo cp-build-dev-ops/command-center-reboot \
+  --label agent-action-required --state open \
+  --json number,title,body --jq '.[] | "#\(.number): \(.title)"'
+
+# 2. Check all open PRs and their status
+gh pr list --repo cp-build-dev-ops/command-center-reboot --state open \
+  --json number,title,headRefName,isDraft,mergeable,statusCheckRollup \
+  --jq '.[] | "#\(.number) \(.title) | mergeable:\(.mergeable)"'
+
+# 3. Read active branches coordination file
+cat docs/ACTIVE_BRANCHES.md
+```
+
+**Decision logic after the check:**
+- If there are `agent-action-required` issues → handle those PRs first (Copilot loop, conflicts)
+- If any open PR has all checks green and no conflicts:
+  - **Dependabot PRs** → auto-merge immediately (no approval needed)
+  - **Phil's PRs from a prior session** → ask Phil: "PR #N looks ready to merge — want me to auto-merge it?"
+- Surface any branches with status `pushed, awaiting local verify` from `docs/ACTIVE_BRANCHES.md`
+- If no open issues and no open PRs → resume whatever the current conversation is about
+- Report the current state to Phil in ≤3 sentences, then proceed
+
+**Step 4 — Check pending reminders**
+
+Read `docs/PENDING_REMINDERS.md` and include any unchecked `[ ]` items in the opening status report. Surface them as a brief list after the PR queue summary. Do not nag — one mention per session is enough. If Phil dismisses an item, mark it `[x]` in the file immediately.
+
+Report the queue state to Phil in ≤3 sentences at the top of the session. Do not ask what to work on — decide and act.
+
+---
+
+## PR Ready Protocol — What Agents Must Do Before Merging
+
+A PR is **not ready** until all of the following are true. Once Phil has approved PR creation, the agent drives every step autonomously.
+
+### Unified PR Ready Checklist (all tiers)
+
+Under the "halve deploys" plan, every PR — Standard, Medium-risk, and Security — runs the same full Copilot feedback loop before merge. Tier only affects the depth of scrutiny applied to each comment (see "Once the PR is open" above and "Comment Decision Framework" below).
+
+| Step | What to check | How to verify |
+|------|--------------|---------------|
+| 1. User approved PR creation | Said yes in this session | Confirmed in chat |
+| 2. Branch current | PR branch is rebased on latest `dev` | `gh pr view <n>` — no "out of date" warning (auto-rebase workflow handles this) |
+| 3. CI green | lint, unit-tests, integration-tests, CodeQL all pass | `gh pr view <n> --json statusCheckRollup` — all `SUCCESS` |
+| 4. Copilot has reviewed the latest code-change commit | Primary mechanism: `.github/workflows/copilot-review.yml` auto-requests Copilot on every qualifying push (authenticates with `COPILOT_REVIEWER_PAT` — `GITHUB_TOKEN` silently no-ops). Manual backup: if the push fell outside the workflow's `paths:` filter or the workflow did not fire, run `gh pr edit <n> --add-reviewer "@copilot"` with a user-scoped token. **Never** use the dead REST endpoint `gh api ... /requested_reviewers -f 'reviewers[]=copilot'`. | `gh pr view <n> --json reviews` — latest Copilot `submittedAt` is newer than the latest non-empty commit `committedDate`. See the "Copilot Auto-Review Setup" section below for the full mechanism table. |
+| 5. Loop processed to an exit condition | Either zero net-new comments on the latest review, OR every net-new comment fixed/resolved or skipped with a documented valid reason, OR 3-round cap reached with Phil sign-off | See "Round cap — 3 iterations" below |
+| 6. All review threads resolved on GitHub | `required_conversation_resolution: true` is enforced repo-wide | `gh api graphql` reviewThreads — all `isResolved: true` |
+| 7. Implemented comments logged | `docs/COPILOT_LEARNINGS.md` updated for every Copilot comment we implemented (not for skips) | Commit includes a LEARNINGS entry |
+| 8. No merge conflicts | PR can be merged cleanly | `gh pr view <n> --json mergeable` — `MERGEABLE` |
+
+**Only after all required steps pass** does the agent auto-merge the PR using `gh pr merge --squash --auto` (or notify Phil if it touches security-sensitive files without an explicit override). For non-release PRs, "required" means all 8 steps. For release PRs, see the exception below — steps 4, 5, and 7 are optional; steps 1, 2, 3, 6, 8 remain mandatory.
+
+> **Merge-command exception for release PRs.** The `--squash --auto` guidance above applies **only to non-release PRs.** Release PRs (see exception definition below) must be merged with `gh pr merge --merge` (not `--squash`) — squash on `dev → main` severs the branch-history link and causes add/add conflicts on every subsequent release. See "Merge Strategy" in the Production Deployment section for the full rationale.
+
+### Release-PR exception — steps 4, 5, 7 are optional
+
+A **release PR** is narrowly defined as a PR with **all** of these properties:
+- Base branch is `main`
+- Head branch is `release/to-prod`
+- Contains **only** merge commits (from prior feature PRs already merged to `dev`) plus **at most one** `chore: bump version to X.Y.Z` commit touching only `package.json` and `package-lock.json`
+- Opened by Phil's agent or Phil directly during a dev → prod promotion
+
+For a release PR meeting this definition:
+- **Step 4 (Copilot has reviewed the latest code-change commit)** — **optional, non-blocking.** The content was already Copilot-reviewed and loop-to-zero on its original feature PR; re-reviewing the same content on the release PR adds 2–3 min of wait time per release for effectively zero new signal. The agent **may** request Copilot review on a release PR to catch drift (an unexpected diff between `dev` and `main`, a suspicious `-X ours` merge result), but does not block merge on it.
+- **Step 5 (Loop processed to exit condition)** — **skipped** when step 4 is skipped; re-introduced automatically if a Copilot review is requested and returns comments.
+- **Step 7 (LEARNINGS entry for implemented comments)** — **skipped** for release PRs (no comments to log since feature-PR comments were already logged).
+
+Steps 1, 2, 3, 6, 8 remain mandatory — the agent still confirms Phil approved, branch is current, CI is green, any existing threads are resolved, and there are no merge conflicts.
+
+**Pre-release audit the agent always runs before opening the release PR:**
+- `git diff origin/main...origin/dev --name-only` — confirm the file set is expected and no file contains unreviewed content beyond what already landed on `dev`
+- `git log origin/dev..origin/main --oneline` — confirm all `main`-only commits are prior release merges or version bumps (no unmerged hotfixes that would be lost under `-X ours`)
+
+This exception exists because the `loop-until-zero-Copilot-comments` gate already ran on every feature PR that contributed content. Running it again on the release PR re-reviews code Copilot already approved. If the pre-release audit surfaces anything unexpected — a file we didn't expect in the diff, a main-only commit that isn't a release marker — the agent falls back to the full checklist for that specific release PR and requests Copilot review.
+
+**Merge command for release PRs:** `gh pr merge <N> --merge` (NOT `--squash`). See "Merge Strategy" in the Production Deployment section — `--squash` on dev→main breaks branch-history linkage and causes add/add conflicts on subsequent releases.
+
+### Copilot pause exception — steps 4, 5, 7 skipped (active while PENDING_REMINDERS item is unchecked)
+
+While **`docs/PENDING_REMINDERS.md` → Copilot pause protocol** remains unchecked:
+
+- **Do not** run `gh pr edit <N> --add-reviewer "@copilot"` or wait for Copilot reviews.
+- **Do not** poll for Copilot comments or process Copilot feedback loops.
+- **`.github/workflows/copilot-review.yml`** is gated off (`false &&` in job `if`) — do not re-enable in agent sessions unless Phil dismisses the reminder.
+- **Substitute gates** (all mandatory): CI green; Pre-PR i18n + CSS audits; Pre-Push Self-Check for touched categories; Cursor adversarial self-review; all **existing** human review threads resolved; Phil merge approval on security-sensitive files.
+
+Steps **1, 2, 3, 6, 8** of the Unified PR Ready Checklist remain mandatory. Tag deploy/preventable issues during the experiment with `copilot-pause-experiment` in `COPILOT_LEARNINGS.md` when logging compound learnings.
+
+**Resume:** Mark the PENDING_REMINDERS item `[x]`, remove `false &&` from `copilot-review.yml`, restore full Copilot loop per this file.
+
+---
+
+## Copilot Auto-Review Setup — Repository Requirement
+
+Copilot review is triggered by **three** mechanisms, in order of reliability:
+
+### 1. `copilot-review.yml` workflow (PRIMARY — fires automatically on every push that matches its path filter)
+
+`.github/workflows/copilot-review.yml` runs on every `pull_request` event (`opened`, `reopened`, `ready_for_review`, `synchronize`) for PRs targeting `dev` **that touch a path matched by the workflow's `paths:` filter** (security tier and medium-risk tier — see the workflow file for the exact list). Pushes that fall entirely outside those paths (e.g. a pure `docs/**/*.md` follow-up commit after the initial push) will NOT trigger this workflow; use mechanism #2 below in that case.
+
+The reviewer-request step uses:
+
+```bash
+gh pr edit "${PR_NUMBER}" --repo "${REPO}" --add-reviewer "@copilot"
+```
+
+This command goes through the GraphQL `requestReviews` mutation, which is the **only** API path GitHub currently accepts for adding Copilot as a reviewer (the legacy REST call at `POST .../pulls/<N>/requested_reviewers` with `reviewers[]=copilot` silently no-ops — see DEAD API warning below).
+
+**Why this is primary:** the workflow fires from the GitHub Actions runner without any local agent intervention, and `ubuntu-latest` ships gh CLI ≥ 2.89 which supports `--add-reviewer @copilot` natively (added in gh 2.88, March 2026 changelog). **Authentication:** the `Request Copilot code review` step authenticates with `GH_TOKEN: ${{ secrets.COPILOT_REVIEWER_PAT }}` — a user-scoped fine-grained PAT with `Pull requests: Read and write` access, stored as a repo secret. The default `GITHUB_TOKEN` silently no-ops for Copilot reviewer requests (verified on PR #677 commits `3f02567` and `63fc6fc`: workflow ran clean, no review ever came; the same command with a user token added Copilot within seconds). The job-level `pull-requests: write` permission is still declared for other step operations (e.g. reading PR data), but the PAT is what makes the reviewer-request mutation succeed. Verified working end-to-end on PR #677 commit `6a698c9`.
+
+### 2. Manual agent-driven re-request (BACKUP — when the workflow's path filter misses)
+
+If a reviewable push didn't match the workflow's `paths:` filter (e.g. a pure `docs/**/*.md` change on a PR that also touched in-scope files earlier), the agent re-requests explicitly:
+
+```bash
+gh pr edit <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot --add-reviewer "@copilot"
+```
+
+**Requires gh ≥ 2.88.** If the agent's local `gh --version` is older, upgrade it or fall back to the workflow (push a whitespace-equivalent change that matches a filtered path).
+
+**DEAD API — do not use:**
+
+```bash
+# ❌ DO NOT USE — silently no-ops since 2026-04-17
+gh api --method POST \
+  repos/.../pulls/<N>/requested_reviewers \
+  -f 'reviewers[]=copilot' \
+  # (or 'reviewers[]=copilot-pull-request-reviewer[bot]' — both dead)
+```
+
+Returns `200 OK` with a well-formed PR body but does NOT add Copilot or trigger a review. Confirmed via `GH_DEBUG=api` trace and direct `requested_reviewers` readback on PR #677 (see `docs/COPILOT_LEARNINGS.md` 2026-04-17 entry). A regression unit test (`__tests__/unit/copilot-review-workflow-command.unit.test.ts`) enforces that `copilot-review.yml` does not revert to this pattern.
+
+**When to skip the re-request** — only for pushes that are literally non-reviewable:
+- Truly empty commits (`git commit --allow-empty`) with no file changes
+- Pure whitespace-only / end-of-line / file-mode diffs
+- Lone `package.json` / `package-lock.json` version-bump commits with no other content
+
+Docs and rule changes **are** reviewable and **do** warrant re-request.
+
+#### Verifying the request landed — required after every re-request call
+
+```bash
+gh api repos/cp-build-dev-ops/command-center-reboot/pulls/<PR_NUMBER>/requested_reviewers \
+  --jq '[.users[].login]'
+# Expected (while the review is pending): ["Copilot"]
+# Expected (after Copilot submits the review): [] — the request is cleared
+#   from the queue once the review is delivered; check /pulls/N/reviews for
+#   the new submission timestamp instead.
+```
+
+**This readback is mandatory** — never assume the request succeeded based on exit code alone. If the list is empty AND no recent review exists, the request failed silently; investigate before continuing the loop.
+
+> **Login string inconsistency (not a bug):** the `requested_reviewers`
+> endpoint returns `"login": "Copilot"` (the App's display name), while
+> the `reviews` endpoint returns `"login": "copilot-pull-request-reviewer"`
+> (the bot account login). Both refer to the same entity. Use `["Copilot"]`
+> (or `[]` post-review) as the authoritative verification for the re-request
+> command; use `copilot-pull-request-reviewer` when parsing review submissions.
+
+### 3. `review_on_push` ruleset (BELT-AND-SUSPENDERS — observed to miss events)
+
+Repository Ruleset ID `13245507` — "Copilot code review"
+- Target branches: `~DEFAULT_BRANCH` + `refs/heads/dev`
+- Rule: `copilot_code_review` with `review_on_push: true`
+- View/edit: https://github.com/cp-build-dev-ops/command-center-reboot/rules/13245507
+
+Historically this was treated as the primary mechanism. Empirically it fires sometimes but not reliably — on PR #677 commit `3f02567` (23:54:23) the ruleset never fired despite being correctly configured. Treat it as backup only; the workflow (#1) is authoritative.
+
+**If Copilot stops auto-reviewing NEWLY OPENED PRs:** the ruleset may have reverted to only `~DEFAULT_BRANCH`. Fix:
+
+```bash
+gh api --method PUT repos/cp-build-dev-ops/command-center-reboot/rulesets/13245507 \
+  --input - <<'EOF'
+{
+  "name": "Copilot code review",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH", "refs/heads/dev"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "copilot_code_review",
+      "parameters": {
+        "review_on_push": true,
+        "review_draft_pull_requests": false
+      }
+    }
+  ]
+}
+EOF
+```
+
+---
+
+## Copilot Feedback Loop
+
+**All PRs — Standard, Medium-risk, and Security — run the full serialized feedback loop.** Tier only changes how aggressively each individual comment is implemented vs. skipped (see "Comment Decision Framework").
+
+| | Standard PRs | Medium-risk PRs | Security PRs |
+|--|--|--|--|
+| Copilot may review? | Yes (auto-requested via repo ruleset) | Yes (auto-requested) | Yes (auto-requested) |
+| Must resolve all threads before merge? | **Yes** (`required_conversation_resolution: true` is repo-wide) | **Yes** | **Yes** |
+| Must run full serialized feedback loop? | **Yes** | **Yes** | **Yes** |
+| Decision framework default when ambiguous | Implement unless skip is well-justified | Implement unless skip is well-justified | Implement; escalate to Phil if unsure |
+
+**Every code-change push requires a new Copilot review.** The `copilot-review.yml` workflow handles the re-request automatically on every `synchronize` event for path-filtered tiers. If the agent is re-requesting manually (path filter miss, or the workflow step failed), use the GraphQL-backed CLI — **never** the dead REST endpoint. The loop after every push:
+
+```
+push code-change to branch
+  → copilot-review.yml auto-requests Copilot (primary path),
+    OR agent runs: gh pr edit <N> --add-reviewer "@copilot"
+    (GraphQL-backed; requires gh >= 2.88; NEVER the dead REST API)
+  → verify: gh api .../requested_reviewers --jq '[.users[].login]' → ["Copilot"]
+  → wait ~2–5 min for Copilot to post the new review
+  → pull all unresolved threads (gh api graphql)
+  → if threads exist:
+      → analyze each comment (see decision framework below)
+      → fix or skip each one with documented reasoning
+      → push fixes
+      → resolve all threads
+      → loop back to top (explicit re-request + wait)
+  → if no threads exist:
+      → verify CI is green
+      → auto-merge
+      → verify deploy
+      → notify Phil
+```
+
+**Do not auto-merge until the loop exits cleanly** — zero unresolved threads, CI green, and either zero net-new Copilot comments on the latest review or Phil's sign-off on the remainder after hitting the round cap.
+
+### Round cap — 3 iterations
+
+Typical PRs converge in 1–2 rounds. The cap is a safety valve for pathological cases and, more importantly, for the common failure mode documented in PR #677: every round keeps catching "real" bugs, the agent rationalises each as a 1-minute fix, and the PR drifts to 7+ rounds while the cap rule is quietly abandoned.
+
+**The cap is 3 rounds. Not 4, not 5. The agent does NOT extend the cap on its own judgment regardless of how small the remaining fix looks.** Phil's direct instruction after PR #677 hit round 7: "max out at 3 rounds moving forward."
+
+**Counting rules:**
+- A "round" only counts when Copilot's latest review posts at least one **net-new** comment — a comment that is not a re-raise of something already resolved with documented skip reasoning.
+- **Re-raised comments** (Copilot flagging something we already skipped, with the skip reason still valid): resolve immediately citing the prior decision (e.g. "Already skipped in thread [ID] — [reason]"). Re-raised comments do NOT count against the cap.
+- **Fresh comments on the same code** (Copilot pointing out a new concern, even if near something we skipped): DO count as net-new and DO count toward the cap.
+
+**What happens at the cap:**
+1. After round 3 still produces net-new comments that aren't clean skips, the agent STOPS pushing fixes. No exceptions. "It's just a 1-line fix" is not a valid reason to push into round 4 — that exact reasoning is what produced rounds 4 through 7 on PR #677.
+2. The agent posts a chat summary to Phil listing each remaining net-new comment, its recommended resolution (fix / skip-with-reason / ignore), and the agent's confidence in each.
+3. Phil makes the call. The agent then either (a) pushes one final fix round with Phil's explicit approval (resetting the counter is NOT allowed), (b) resolves remaining threads as "past cap, deferred to follow-up PR" and merges, or (c) opens a follow-up PR for the remaining items and merges the current PR as-is.
+
+**Anti-pattern — rationalisation-driven loop (the PR #677 failure mode):** The agent decides "this is a real bug, the fix is tiny, I'll just do it" and pushes round 4. Round 4 Copilot catches another real bug introduced by round 3's fix. The agent rationalises again. Round 5, 6, 7 all follow the same pattern. **Each individual fix looks reasonable in isolation; the aggregate is the anti-pattern.** If you are past round 3 and about to push "just one more fix", STOP. Hand off to Phil instead.
+
+**Anti-pattern — preemptive skipping:** Do not preemptively skip borderline comments in rounds 1–3 just to stay under the cap. The cap is a human-handoff trigger, not a quality-reduction lever. If rounds 1–3 are producing real bugs, that is exactly the signal that human review is needed — follow the handoff protocol instead of rushing to ship.
+
+### After the Loop: Log Learnings
+
+Once the Copilot feedback loop is clean, **before merging**, add an entry to `docs/COPILOT_LEARNINGS.md` for every Copilot comment that was **implemented** (skip "already fixed" skips — only log things we genuinely missed):
+
+```markdown
+### YYYY-MM-DD | PR #N | category
+
+**What Copilot caught:** One sentence.
+**Root cause:** Why the agent missed it.
+**Fix applied:** What changed.
+**Rule to reinforce:** The principle that would have prevented this.
+```
+
+Categories: `shell/safety`, `github-actions/triggers`, `github-actions/permissions`, `github-actions/dedup`, `graphql/pagination`, `prisma/transactions`, `security/guards`, `typescript/types`, `i18n`, `testing`
+
+Commit the updated `COPILOT_LEARNINGS.md` as part of the PR branch (not a separate PR). This keeps the log and the fix in the same history.
+
+### Comment Decision Framework — Implement or Skip?
+
+Think carefully before acting on each comment. Copilot is useful but not always right. Use this framework:
+
+#### Implement when:
+- It catches a real bug (incorrect logic, uncaught error, data loss risk)
+- It catches a security issue (missing auth check, PII leak, injection risk)
+- It catches a missing test for new behavior
+- It flags broken or misleading documentation
+- The fix is low-risk and clearly correct
+
+#### Skip when (each bullet maps 1:1 to one of the four approved verbatim patterns — see "Always document skip reasoning" below):
+- Maps to pattern #1 — The suggestion conflicts with a documented architectural decision in this repo (cite the rule file / PR / doc that contains the decision)
+- Maps to pattern #2 — The code it's commenting on was already fixed in a dependent PR now in `dev` (cite the PR number and verify the fix is actually in `dev`)
+- Maps to pattern #3 — The suggestion is purely stylistic and an ESLint rule already enforces the convention (cite the specific rule)
+- Maps to pattern #4 — It's a scope / meta comment ("this PR does too much") with no concrete code change to implement or reject
+
+**Removed from this list** (no longer valid skip rationales, do not use — if one of these applies you must either implement, escalate, or fit the comment into one of the four patterns above):
+- ~~"It's flagging something in a file this PR doesn't own"~~ — Copilot reviewing unrelated context is rare, and when it happens the right move is to post a reply acknowledging out-of-scope, resolve the thread, and move on — **not** to skip the comment without a documented pattern. If the comment flags a real bug in adjacent code, open a follow-up issue or PR.
+- ~~"The suggestion would introduce more complexity than the bug it fixes is worth"~~ — this rationale is subjective and has historically masked real bugs. If the suggested fix is genuinely too complex, the underlying bug is still worth documenting — either implement a simpler fix or file an issue and resolve the thread with pattern #2 once the issue exists.
+
+#### Never skip when:
+- It's a security issue — always implement or escalate to Phil
+- It's a real data integrity bug (P2002, missing transaction, etc.)
+- It flags missing tests for a code path that was just changed
+
+#### Always document skip reasoning (use one of the four approved patterns):
+
+Every skip comment must quote — verbatim or near-verbatim — one of these four valid patterns. Free-form skips are not allowed:
+
+1. **"Conflicts with documented architectural decision [X]"** — cite the rule file, PR, or doc that contains the decision. Example: "Conflicts with documented architectural decision in `package.json` overrides (ESLint v6 pin — hono/@hono/node-server compat)."
+2. **"Already fixed in PR #[N] which is now in `dev`"** — cite the PR number and confirm the fix is actually in `dev`. Example: "Already fixed in PR #650 which is now in `dev` — the Dockerfile already installs Chromium shared libs."
+3. **"ESLint rule [X] already enforces this"** — cite the specific ESLint rule that guarantees the behavior. Example: "ESLint rule `no-explicit-any` already enforces this — a type-break would fail CI."
+4. **"Scope comment with no actionable code change"** — use only when Copilot's comment is meta-commentary (e.g. "this PR does too much") with no concrete code suggestion to implement or reject.
+
+**Invalid** (agent must NOT use these or any free-form variant): "seems fine", "not sure", "low priority", "out of scope", "not worth it", "minor", "style only", "works as-is".
+
+If the comment does not fit one of the four patterns, it must be implemented — there is no fifth escape hatch.
+
+---
+
+### Agent Communication Protocol — Addressing Copilot Comments
+
+When addressing Copilot review comments, follow this exact communication pattern so Phil always knows what's happening and how far along you are.
+
+#### Step 1 — Announce in chat (before doing anything)
+
+Open with a structured list in the Cursor chat:
+
+```
+📋 PR #N — found X Copilot comment(s). Working through them now:
+
+1. `path/to/file.ts` line 42 — <one-line summary of what Copilot flagged>
+2. `path/to/other.ts` line 15 — <one-line summary>
+...
+```
+
+#### Step 2 — Report each fix in chat as you go
+
+After each fix or skip, immediately report it before moving to the next:
+
+```
+✅ 1/3 — `path/to/file.ts`: <what you changed and why>
+⏸️ 2/3 — `path/to/other.ts`: Skipped — <exact reason>
+✅ 3/3 — `path/to/third.ts`: <what you changed and why>
+```
+
+#### Step 3 — Post the final ready comment on the PR
+
+Only after ALL comments are addressed (not before):
+
+```bash
+gh pr comment <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot --body "$(cat <<'EOF'
+✅ **PR ready for your review, @philipamour**
+
+**Checklist:**
+- [x] Branch rebased on latest `dev`
+- [x] All CI checks green (lint, unit tests, integration tests, CodeQL)
+- [x] Copilot code review complete
+- [x] All Copilot comments analyzed (pulled via `gh api graphql`)
+- [x] All Copilot comments addressed in code or skipped with documented reasoning
+- [x] All conversations resolved on GitHub
+- [x] No merge conflicts
+
+**Summary of changes:** <one sentence describing what this PR does>
+
+**Copilot comments actioned:**
+- 1/N `path/to/file.ts`: <what Copilot flagged> → Fixed: <what changed> / Skipped: <reason>
+- 2/N `path/to/file.ts`: <what Copilot flagged> → Fixed: <what changed> / Skipped: <reason>
+EOF
+)"
+```
+
+#### Step 4 — Close out in chat
+
+```
+All done on PR #N. X fixed, Y skipped. Merging now.
+```
+
+#### ACTIVE_BRANCHES — drop merged rows immediately
+
+After `state:MERGED` for a feature PR into `dev` (or when you confirm merge from GitHub), **remove that branch's row from `docs/ACTIVE_BRANCHES.md` before the session ends** — same session as the merge receipt, no exceptions. If the row was not removed in a final commit on the feature branch, open or extend the next `dev` PR with that one-line doc fix. Stale rows cause false conflict warnings and wasted coordination.
+
+### After Merging: Verify the Deploy, Then Print the Receipt
+
+Merging to `dev` always triggers the Railway deploy workflow. The `verify` job in that workflow is a hard gate — it polls `/api/health` and fails the entire workflow if HTTP 200 is not returned. **`conclusion=success` on the deploy workflow now means the container is alive. Do not declare success based on anything else.**
+
+#### Phil — hand off to GitHub Actions (watch the full `Deploy` workflow)
+
+Merging to `dev` or `main` triggers a **single** GitHub Actions workflow: **`Deploy`** (`deploy.yml`). The run title in the UI is **`Deploy → <branch> by <actor>`** (e.g. `Deploy → dev by cp-build-dev`). That **one** run orchestrates **Unit Tests → Integration Tests → Build → Deploy to Railway → verify** (plus `generate-tour` / `smoke-test` as configured). The Actions graph and job logs (Vitest summaries, per-job timing, deploy step output) are **the** source of truth for progress—Phil prefers to watch that UI himself rather than read generic agent polling in chat.
+
+- **Do** post **one** in-chat message as soon as the workflow run exists for the triggering commit (see Step 1a). Include:
+  - The run title / branch
+  - **Direct link:** `https://github.com/cp-build-dev-ops/command-center-reboot/actions/runs/<RUN_ID>`
+  - A short line that he can follow tests → build → Railway → verify there and hit dev when the run is green.
+
+- **Do not**:
+  - Anchor the “tell Phil” milestone on the Railway job alone—the **whole workflow run** is what he opens.
+  - Run long **chat-blocking** loops (e.g. sleep 15s × many iterations) narrating `in_progress` / `queued`. That does not match the detail of the GitHub graph and wastes attention.
+  - Imply that periodic agent checks are a substitute for the Actions UI.
+
+**When the run finishes:** Still print the full **DEPLOY RECEIPT** (Steps 2–4) once `conclusion` is known—see **completion without chat spinners** below.
+
+#### Step 1a — Find the `Deploy` run for this SHA (brief; then hand off)
+
+Poll **lightly** only until GitHub lists the run (runs can take a few seconds to appear). Cap roughly **~2 minutes** of retries (e.g. 8 × 15s), not a long blocking session.
+
+```bash
+BRANCH="dev"  # or "main" for prod
+MERGE_SHA=$(gh pr view <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot \
+  --json mergeCommit --jq '.mergeCommit.oid')
+
+DEPLOY=""
+for i in $(seq 1 8); do
+  RAW=$(gh run list --repo cp-build-dev-ops/command-center-reboot \
+    --workflow deploy.yml --branch "$BRANCH" --commit "$MERGE_SHA" --limit 1 \
+    --json databaseId,headSha,status,conclusion,displayTitle)
+  DEPLOY=$(echo "$RAW" | jq -c '.[0] // empty')
+  [ -n "$DEPLOY" ] && [ "$DEPLOY" != "null" ] && break
+  sleep 15
+done
+
+if [ -z "$DEPLOY" ] || [ "$DEPLOY" = "null" ]; then
+  # Do not run jq on empty JSON — post the branch workflow filter URL instead
+  echo "Deploy run not listed yet for merge SHA — open Actions: https://github.com/cp-build-dev-ops/command-center-reboot/actions/workflows/deploy.yml?query=branch%3A${BRANCH}"
+else
+  RUN_ID=$(echo "$DEPLOY" | jq -r '.databaseId')
+  RUN_TITLE=$(echo "$DEPLOY" | jq -r '.displayTitle')
+  echo "Hand off: $RUN_TITLE — https://github.com/cp-build-dev-ops/command-center-reboot/actions/runs/$RUN_ID"
+  # Retain MERGE_SHA and RUN_ID for Step 1b / recovery (same deploy run only)
+fi
+```
+
+If the run never appears after that window, the `if` branch above already gives Phil a direct link to filter `deploy.yml` on the right branch.
+
+#### Step 1b — Completion check (no multi-minute chat poll)
+
+**Do not** block this chat on a loop until `status=completed`. Instead:
+
+- On Phil’s **next** message (any topic): if there is a **pending** deploy for the session’s merge SHA and the receipt was **not** printed, run **one** `gh run list` / `gh run view` for that run. If `completed` → Steps 2–4 (receipt or failure diagnosis). If still `in_progress` → one line: still running, same Actions link—**no** sleep loop in this response.
+- If Phil asks deploy status or explicitly says to wait until done, you may poll **in that response only** until complete or a reasonable timeout, then receipt—but default is **hand off + resume on next message**.
+
+#### If the conversation moved on — recover proactively
+
+At the start of a response, if a deploy was triggered earlier and **no receipt** was printed yet, run **one** status check scoped to **the same merge SHA** as Step 1a (never `--branch` + `--limit 1` alone — that can match someone else’s deploy). Use the stored `MERGE_SHA` and `BRANCH`, or `RUN_ID` from the handoff with `gh run view "$RUN_ID" --json status,conclusion`.
+
+```bash
+BRANCH="dev"   # same as Step 1a
+MERGE_SHA="…"  # same merge commit oid as Step 1a
+DEPLOY=$(gh run list --repo cp-build-dev-ops/command-center-reboot \
+  --workflow deploy.yml --branch "$BRANCH" --commit "$MERGE_SHA" --limit 1 \
+  --json databaseId,headSha,status,conclusion,displayTitle \
+  --jq '.[0]')
+echo "$DEPLOY" | jq -r '"\(.status)/\(.conclusion // "pending") id:\(.databaseId) \(.displayTitle)"'
+```
+
+Never assume the deploy is fine without the receipt path once the run has **succeeded**—always curl health when printing success (Step 3).
+
+**Re-fetch before Steps 2–4:** If time has passed since Step 1a, run the same `gh run list ... --commit "$MERGE_SHA"` again so `DEPLOY` reflects the current `status` / `conclusion`.
+
+#### Step 2 — If `conclusion=failure`: diagnose and fix before notifying Phil
+
+```bash
+RUN_ID=$(echo "$DEPLOY" | jq -r '.databaseId')
+gh run view "$RUN_ID" --repo cp-build-dev-ops/command-center-reboot --log-failed 2>&1 | tail -50
+```
+
+Fix the root cause, push to a new branch, open and merge a follow-up PR. Only proceed once the deploy workflow shows `conclusion=success`.
+
+#### Step 3 — If `conclusion=success`: independently confirm health and print the receipt
+
+Even though the `verify` job already confirmed HTTP 200 in CI, independently curl the endpoint and print the full receipt to chat. This is unconditional — no judgment, no skipping.
+
+```bash
+# Dev
+HEALTH_URL="https://command-center-reboot-dev.up.railway.app/api/health"
+# Prod
+# HEALTH_URL="https://command-center-reboot-production.up.railway.app/api/health"
+
+HEALTH_RESPONSE=$(curl -s "$HEALTH_URL" 2>/dev/null || echo '{"error":"unreachable"}')
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" 2>/dev/null || echo "000")
+RUN_ID=$(echo "$DEPLOY" | jq -r '.databaseId')
+```
+
+Then print this receipt in chat (include all three checkpoints every time, no exceptions):
+
+```
+✅ DEPLOY RECEIPT — [dev|prod] — [$(date +"%l:%M:%S %p" | sed 's/^ //')]
+
+Checkpoint 1 — CI (all jobs must show ✅):
+  https://github.com/cp-build-dev-ops/command-center-reboot/actions/runs/<RUN_ID>
+  unit-tests ✅  integration-tests ✅  build ✅  deploy ✅  verify ✅
+
+Checkpoint 2 — Health endpoint (open in browser to verify independently):
+  https://command-center-reboot-[dev|production].up.railway.app/api/health
+  Response: <HEALTH_RESPONSE>
+
+Checkpoint 3 — App (open to confirm it loads):
+  https://command-center-reboot-[dev|production].up.railway.app/en
+```
+
+**If `HTTP_CODE` is not 200 after `conclusion=success`:** this is a contradiction — the `verify` job passed but health is now failing. Treat this as a post-deploy regression. Do NOT print the receipt. Diagnose immediately.
+
+#### Step 4 — Check for workflows awaiting approval
+
+```bash
+gh run list --repo cp-build-dev-ops/command-center-reboot --limit 20 \
+  --json databaseId,name,conclusion,headBranch \
+  --jq '.[] | select(.conclusion == "action_required") | "⚠️  APPROVAL NEEDED: https://github.com/cp-build-dev-ops/command-center-reboot/actions/runs/\(.databaseId) — \(.name) (\(.headBranch))"'
+```
+
+Include any approval-needed runs in the receipt message.
+
+#### Step 5 — Wait for Phil to verify, then offer the prod PR
+
+```
+Verify in dev when ready — open Checkpoint 3 to confirm.
+Say the word and I'll open the prod PR.
+```
+
+Do NOT open the prod PR until Phil explicitly approves.
+
+---
+
+## Production Deployment
+
+### Version Bump — Required for Every Prod PR
+
+The version bump is committed **on the `release/to-prod` branch** after it is created from `origin/dev`. The correct sequence is:
+
+1. Create `release/to-prod` from `origin/dev` (see Merge Strategy below)
+2. Run the appropriate `npm version` command on the release branch:
+
+```bash
+# Default (every release) — patch bump:
+npm version patch --no-git-tag-version
+
+# Phil says "significant release" — minor bump:
+npm version minor --no-git-tag-version
+
+# Phil says "whole new version" — major bump:
+npm version major --no-git-tag-version
+```
+
+3. Commit `package.json` and `package-lock.json` as the version bump commit
+4. Push and open the PR to `main`
+
+- `--no-git-tag-version` updates `package.json` and `package-lock.json` without creating a git tag or commit
+- The new version number must appear in the PR title, e.g.: `release: promote dev → prod (v1.0.1)`
+- The health endpoint at `/api/health` reads `process.env.npm_package_version` and will automatically reflect the new version after deploy — no code change needed
+
+### Default Process
+
+1. Wait for Phil's explicit prod approval after he verifies in dev (e.g. "looks good", "ship it", "open the prod PR")
+2. Create the `release/to-prod` branch from `origin/dev` (see Merge Strategy below)
+3. Bump the version on the release branch — patch by default, unless Phil specifies minor or major
+4. Push, open the prod PR targeting `main`
+5. After merging, follow the exact same receipt protocol as dev (Steps 1–5 above), substituting `main` for `BRANCH` and the prod URLs.
+
+### Merge Strategy — CRITICAL: Always use `--merge`, never `--squash` for dev→main
+
+**Using `--squash` on the dev→main PR causes recurring add/add conflicts on every subsequent release.**
+
+Why: `--squash` flattens dev's commits into a single commit on main. The merge-base for the next dev→main merge becomes a commit that predates those file additions. Git sees both branches as having "added" those files independently — that's the add/add conflict.
+
+Using a regular merge commit links the two branch histories at this point, so subsequent releases will not trigger the same add/add pattern (though real content conflicts remain possible if hotfixes land on main independently).
+
+**The correct process for every prod release:**
+
+```bash
+# 1. Create a release branch from dev, merge main into it to pre-resolve any divergence.
+#    WARNING: -X ours keeps dev's version for every conflicting hunk.
+#    Before using this, check git diff origin/main...origin/dev for any main-only
+#    hotfixes that should be preserved. If hotfixes exist, resolve manually instead.
+git checkout -b release/to-prod origin/dev
+git diff origin/main...origin/dev --name-only   # check for main-only changes first
+git merge origin/main -X ours --no-edit         # then merge, keeping dev's versions
+git push origin release/to-prod
+
+# 2. Create PR from release/to-prod → main (conflicts are pre-resolved in the branch)
+gh pr create --base main --head release/to-prod ...
+
+# 3. Merge with --merge (regular merge commit), NEVER --squash
+gh pr merge <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot --merge
+```
+
+This creates a real merge commit that links main and dev's histories, avoiding the recurring add/add conflict pattern on future releases.
+4. The `verify` job in the deploy workflow is the authoritative confirmation. `conclusion=success` means HTTP 200. There are no exceptions or special cases for smoke-test failures — smoke-test is always non-blocking and its result is never used to determine deploy success.
+
+### Confirmed URLs
+
+| Environment | Health endpoint | App |
+|---|---|---|
+| dev | `https://command-center-reboot-dev.up.railway.app/api/health` | `https://command-center-reboot-dev.up.railway.app/en` |
+| prod | `https://command-center-reboot-production.up.railway.app/api/health` | `https://command-center-reboot-production.up.railway.app/en` |
+
+These URLs are confirmed working. Use them verbatim in curl commands and receipts — do not substitute other domains.
+
+### When a PR Touches Security-Sensitive Files (Phil Must Review, unless explicit override)
+
+Instead of auto-merging, post this comment on the PR and tell Phil in chat:
+
+```bash
+gh pr comment <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot --body "$(cat <<'EOF'
+⚠️ **This PR requires Phil's review before merging**
+
+All checks pass and Copilot comments are resolved, but this PR touches security-sensitive files that require human sign-off:
+- [list the specific files]
+
+Everything else is ready. Awaiting your approval to merge.
+EOF
+)"
+```
+
+Chat message: `⚠️ PR #N is ready but touches [file] — needs your eyes before I merge. Link: [url]`
+
+### When Agents May Skip Copilot Suggestions
+
+Document your reasoning when skipping. Valid reasons to skip:
+- Suggestion conflicts with a project-wide constraint (e.g. ESLint incompatibility, intentional architectural decision)
+- Suggestion is already handled by existing automation or a different PR
+- Suggestion is purely stylistic and ESLint already enforces the convention
+
+Invalid reasons to skip: "it seems fine as-is", "not sure", "low priority".
+
+---
+
+## Agent Authorization — What Each Agent Is Allowed To Do
+
+Each agent operates on behalf of the user who is guiding it. Agents handle routine operations autonomously and only surface genuine blockers.
+
+### Phil's Agent (this agent — Cursor/Claude)
+
+Authorized to do on Phil's behalf:
+- Push commits to any `feat/`, `fix/`, or `chore/` branch
+- Update `docs/ACTIVE_BRANCHES.md` to register branches and track status
+- Create PRs targeting `dev` **only after Phil explicitly approves** ("create a PR", "open the PR", "looks good, PR it", etc.)
+- Run the full PR lifecycle autonomously once Phil approves: Copilot loop, auto-merge, deploy verify
+- Run Railway CLI commands (`railway variables set/get`, `railway logs`, `railway environment`)
+- Run GitHub CLI commands (`gh pr create/view/comment`, `gh api graphql`, `gh run list`, `gh pr update-branch`)
+- Set Railway environment variables in **dev** environment without asking
+- Set Railway environment variables in **production** only when Phil explicitly requests it
+- Resolve Copilot review threads via GraphQL mutation
+- Update GitHub org/repo settings via `gh api` when Phil directs it
+- Read, create, and edit any file in the codebase except `.env`
+- Commit and push changes directly to the current working branch
+
+Not authorized to do without Phil's explicit approval:
+- Create a PR without Phil's explicit go-ahead
+- Merge contributor PRs (Hannah or other team members) into `dev` or `main`
+- Delete branches that have been pushed to remote
+- Force-push to `dev` or `main`
+- Make destructive database changes (drop tables, delete production data)
+- Commit `.env` or any file containing real secrets
+
+### Hannah's Agent (Cursor/Claude on Hannah's machine)
+
+Authorized to do on Hannah's behalf:
+- Push commits to any `hannah/` branch
+- Update `docs/ACTIVE_BRANCHES.md` to register the branch and files being touched — **required before starting work**
+- Create PRs targeting `dev` with the `design` label **only after Hannah explicitly approves**
+- Run GitHub CLI commands (`gh pr create/view/comment`)
+- Read any file in the codebase
+- Edit files in `components/`, `app/[locale]/`, `messages/`, `app/globals.css`, `public/`
+
+Not authorized to do:
+- Touch `prisma/schema.prisma`, `lib/db.ts`, `lib/auth.ts`, `lib/permissions.ts`, or any `app/api/` route
+- Run Railway CLI commands (deployment is Phil's domain)
+- Merge PRs into `dev`
+- Modify `.github/workflows/` files
+- Commit without passing `npm run build && npm run lint && npm run test:unit`
+
+### RAD Dev Agent (Cursor/Claude on a RAD dev's machine)
+
+> **Session startup:** Read `docs/ACTIVE_BRANCHES.md` to check for file conflicts before starting. Do NOT run the PR queue check or auto-merge logic — those belong to Phil's agent only. Load the relevant `docs/agent-context/` files and follow this workflow.
+
+Authorized to do on a RAD dev's behalf:
+- Push commits to any `feat/`, `fix/`, or `chore/` branch
+- Update `docs/ACTIVE_BRANCHES.md` to register the branch and files being touched — **required before starting work**
+- Create PRs targeting `dev` with an appropriate label (`backend`, `chore`, etc.) **only after the RAD dev explicitly approves**
+- Run GitHub CLI commands (`gh pr create/view/comment`)
+- Read any file in the codebase
+- Edit `components/`, `app/[locale]/`, `messages/`, `lib/` (excluding auth and permissions files), `app/api/` routes that do not touch auth, permissions, or schema
+
+Not authorized to do:
+- Touch `prisma/schema.prisma`, `lib/auth.ts`, `lib/permissions.ts`, `lib/dev-session.ts`, or any `hasPermission` / `PERMISSIONS` logic — changes to these require Phil's explicit approval
+- Run Railway CLI commands (deployment is Phil's domain)
+- Merge PRs into `dev` or `main`
+- Modify `.github/workflows/` files
+- Run the session startup PR queue or auto-merge checklist
+- Commit without passing `npm run build && npm run lint && npm run test:unit`
+
+### GitHub Actions Permissions
+
+The `cp-build-dev-ops` organization has **read/write workflow permissions** and **"Allow GitHub Actions to create and approve pull requests"** enabled at the org level. Individual workflow files declare their own `permissions:` blocks. Workflows do not require manual approval to run.
+
+## Direct Pushes to `main` Are Blocked
+
+All changes go through `dev` via PR. `main` is protected and requires passing CI + approval.

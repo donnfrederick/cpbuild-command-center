@@ -1,0 +1,2 @@
+export const PROJECT_NOTES_PAGE_SIZE = 5;
+export const PROJECT_NOTES_SNAPSHOT_CAP = 50;

@@ -1,0 +1,16 @@
+.git
+.github
+.cursor
+node_modules
+.next
+.env
+.env.*
+!.env.example
+*.log
+coverage
+__tests__
+e2e
+playwright-report
+test-results
+docs
+README.md

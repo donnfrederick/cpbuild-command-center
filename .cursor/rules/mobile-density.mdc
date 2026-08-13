@@ -1,0 +1,197 @@
+---
+description: Mobile-first density and icon-first UI defaults for Hannah's design work. Apply BEFORE writing UI, not as iteration.
+alwaysApply: true
+---
+
+# Mobile-first density — Hannah's defaults
+
+Hannah designs a mobile-first field app for CP Build. She works on phones
+first, desktops second. When she asks for UI, apply these defaults in the
+FIRST draft — don't wait for her to push you toward compactness.
+
+Full rationale and examples: `docs/design/MOBILE_DENSITY.md`.
+
+## 1. Icons beat labels for secondary actions
+
+Any button that is NOT the primary CTA on the screen is **icon-only** by
+default. Put the label in `aria-label` and `title`.
+
+| Action            | Default              |
+|-------------------|----------------------|
+| Preview           | `<Eye />` only       |
+| Back / close      | `<ArrowLeft />` / `<X />` only |
+| Overflow menu     | `<MoreHorizontal />` only     |
+| Save (secondary)  | `<Save />` only      |
+| Duplicate         | `<Copy />` only      |
+| Delete            | `<Trash2 />` only    |
+| Expand / collapse | chevron only         |
+
+Keep a label only on:
+
+- The **single primary CTA** on the screen (Publish, Submit, Continue).
+- Actions where the icon is genuinely ambiguous AND the screen has space.
+- Destructive confirmations inside menus (where an icon alone could mislead).
+
+If you're tempted to put labels on two sibling buttons, one of them should
+be an icon.
+
+## 2. Autosave replaces explicit Save
+
+If a surface edits persistent data (forms, settings, profile, etc.), prefer
+autosave with a lightweight "Saved / Saving…" indicator over a dedicated
+Save button. If you keep an explicit Save button alongside autosave
+(because users expect it), it should be **icon-only** — the text-label Save
+is the one that gets cut on narrow screens.
+
+## 3. Header toolbars: the 3-item rule
+
+Sticky top bars on mobile hold at most:
+
+- 1 navigation control (back / close)
+- 1 contextual indicator (status pill, saved state, step counter)
+- 2–3 actions, with AT MOST ONE text label (the primary CTA)
+
+Everything else goes into an overflow (`⋯`) menu or a secondary surface.
+
+If your toolbar has more than 3 buttons OR more than 1 labeled button,
+stop and cut.
+
+## 4. Tap targets come from padding, not label length
+
+Mobile hit targets are 40–44 px minimum — achieve that with padding
+**around** small icons, not by oversizing labels.
+
+- A 16 px icon inside a 32×32 or 40×40 ghost button ✅
+- A 48 px wide "Save draft" pill next to another labeled button ❌
+
+## 5. Spacing defaults — these are MAXIMUMS on mobile, not targets
+
+When you write a card/row/section for the first time, start from the LOW end
+of these ranges. Larger values require a specific reason (desktop-only
+surface, accessibility tap target, designer asked for breathing room).
+
+- Header height: 52–56 px (one finger tap)
+- Toolbar horizontal padding: **10–12 px mobile**, 20–24 px desktop
+- Card padding: **10–12 px mobile**, 16–20 px desktop
+- List/page wrapper padding around a stack of cards: **10–12 px mobile**,
+  16–24 px desktop — do NOT double-pad (if the page wrapper has 16 px
+  horizontal padding and each card has 16 px, that's 32 px of chrome
+  before content)
+- Row padding: 8–12 px vertical on mobile — never more
+- Gaps between toolbar items: 6–8 px
+- Gaps between stacked cards: 8 px mobile, 12 px desktop
+- Flex gap inside a card row (icon + content + actions): 8–10 px, never 14+
+
+**Red flag:** if you catch yourself writing `padding: "16px"` or larger on
+a card, row, or list wrapper without a specific reason, you're defaulting
+to desktop comfort values. Drop to 10–12 px.
+
+## 6. The 320 px test
+
+Before handing UI to Hannah: imagine the screen at 320 px wide (iPhone SE
+portrait). What wraps, overflows, or crowds out content? Fix it BEFORE
+showing her. Common offenders:
+
+- Labeled buttons in sticky headers
+- Icon + label combos when icon alone would do
+- Large padding on cards / rows
+- Nested indentation eating width
+
+## 7. Never nest padded containers on mobile
+
+On mobile breakpoints, **never** use nested padded boxes to show hierarchy.
+Every level of nesting eats ~20–30 px of horizontal width (left + right
+padding) on screens that are already only 320–400 px wide. By level 3
+you've surrendered ~90 px — roughly 25 % of the viewport — to chrome.
+
+**Forbidden patterns on mobile:**
+
+```
+[card p=16 [callout p=14 [inner-card p=12 [content]]]]   ❌
+[section p=16 [sub-section p=14 [row p=10 [content]]]]   ❌
+```
+
+**Use one of these instead:**
+
+- **Flatten a level**: replace `[card [inner-card [content]]]` with a
+  single card and separate items with 1 px top borders, gaps, or subtle
+  background tints. The colored container IS the visual grouping — no
+  need for a second padded box inside it.
+- **Bleed to edges**: use negative horizontal margin on the inner block
+  (`marginLeft: -14, marginRight: -14, paddingLeft: 14, paddingRight: 14`)
+  when emphasis is needed. This costs zero width.
+- **Drop the wrapper**: if the only job of an inner container is visual
+  grouping, delete it and use spacing or color only.
+
+**Rule of thumb:** at 320 px wide, your content should never sit inside
+more than **two** padded containers (the page, and one visual section).
+If you need a third level, you're designing for desktop — stop and
+refactor.
+
+## 8. Reserve space for action buttons — don't float them over content
+
+When a card or row has action buttons (edit, preview, overflow menu, etc.)
+in one corner, they must be rendered as a **flex sibling** of the
+content column — NOT absolute-positioned on top of it. Absolute
+positioning guarantees that long titles, descriptions, or status pills
+will eventually flow underneath the icons, especially on narrow screens.
+
+**Wrong (content can overlap actions):**
+
+```
+<div style={{ position: "relative", padding: 14 }}>
+  <div>{title}{description}{meta}</div>
+  <div style={{ position: "absolute", top: 12, right: 14 }}>
+    [Eye] [⋯]
+  </div>
+</div>
+```
+
+**Right (content column and actions are siblings, no overlap possible):**
+
+```
+<div style={{ display: "flex", gap: 8, padding: 12 }}>
+  <div style={{ flex: 1, minWidth: 0 }}>{title}{description}{meta}</div>
+  <div style={{ flexShrink: 0, position: "relative" }}>
+    [Eye] [⋯]
+    {menuOpen && <Dropdown />}  {/* position:absolute relative to actions wrapper */}
+  </div>
+</div>
+```
+
+`minWidth: 0` on the content column is required — without it, the title
+tries to take its intrinsic width and shoves the actions off-screen
+instead of wrapping. The actions wrapper keeps `position: relative` so
+any dropdown menus inside it still anchor correctly.
+
+**Only use absolute positioning for:** ribbons/badges that intentionally
+bleed over the card border (e.g. a "Just published" ribbon on the top
+edge), or decorative overlays that must sit outside the flex flow.
+
+## 9. No decorative icons on repeating list items
+
+A list of N items that all share the same type (e.g. a list of forms,
+a list of projects) does NOT need an identical icon on every row. The
+page title and context already establish what kind of thing these are.
+Putting a 40×40 icon blob on each card burns ~54 px of horizontal
+width per row (icon + gap) that could be content, and adds zero
+signal because the icon is constant.
+
+**Only include a per-item icon when it conveys real per-item information:**
+
+- Unit type color chips on the Locations page ✅ (the color varies)
+- File-type icon on a mixed list of docs/images/forms ✅ (the icon varies)
+- A clipboard icon on every form in a list of forms ❌ (constant, redundant)
+
+When you catch yourself reaching for `<Icon />` inside a repeating card,
+stop and ask: does this icon change from row to row? If not, delete it.
+
+## 10. When in doubt
+
+Fewer elements, more compact spacing, icons over labels, flatter
+hierarchy. Hannah would rather you delete a button than add one.
+
+## Related invariants
+
+- `.cursor/rules/nav-invariants.mdc` — navigation placement rules (feedback
+  page is NEVER in the mobile bottom nav).

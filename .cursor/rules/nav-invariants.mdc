@@ -1,0 +1,44 @@
+---
+description: Product invariants for navigation placement (Hannah). These are non-negotiable — do not override without direct confirmation.
+alwaysApply: true
+---
+
+# Navigation invariants — Hannah's rules
+
+These are hard product rules. Never violate them, no matter how sensible an
+edit may look in isolation. If you think one of these needs to change, stop
+and ask Hannah before editing the component, the props, the tests, the i18n
+keys, or anything else related.
+
+Full explanation and rationale: `docs/design/NAV_INVARIANTS.md`.
+
+## 1. Feedback page placement (MOBILE)
+
+The Feedback page (`/feedback`, "Submit Feedback") MUST NOT appear in the
+mobile bottom nav. It lives ONLY in the profile-icon menu in the top-right
+corner (`components/layout/MobileAccountPanel.tsx`).
+
+**Forbidden files/locations to add a feedback item to:**
+- `components/layout/MobileBottomNav.tsx`
+- `components/projects/ProjectMobileBottomNav.tsx`
+- Any new file matching `**/*MobileBottomNav*.tsx` or `**/*BottomNav*.tsx`
+
+**Allowed:**
+- `components/layout/MobileAccountPanel.tsx` (the profile menu). This is the
+  one and only place feedback appears on mobile.
+
+**Enforcement:**
+- `__tests__/unit/MobileBottomNav.unit.test.tsx` has an invariant test
+  asserting `/feedback` is not in the nav. Do not delete or weaken this
+  test. If it starts failing, fix the regressed component.
+- `MobileBottomNav.tsx` has a header comment repeating this rule.
+
+**Before editing any bottom-nav component, search for `feedback`, `/feedback`,
+and `MessageSquarePlus` / `MessageSquareHeart` icons to confirm you are not
+reintroducing the item.**
+
+## Adding new invariants
+
+When Hannah clarifies a nav placement rule a second time, add it to this file
+AND to `docs/design/NAV_INVARIANTS.md` in the same commit. Twice-clarified =
+belongs in the guardrail.

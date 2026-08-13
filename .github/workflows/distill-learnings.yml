@@ -1,0 +1,315 @@
+name: Distill Copilot Learnings
+run-name: "Distill Copilot Learnings — ${{ github.event_name == 'schedule' && 'scheduled' || 'manual' }}"
+
+# Runs every Monday at 9am UTC and on manual dispatch.
+# Creates a GitHub Issue asking the Cursor agent to review COPILOT_LEARNINGS.md,
+# identify patterns, and propose updates to .cursor/rules/ so recurring issues
+# become proactive checks instead of reactive fixes.
+#
+# The agent should:
+#   1. Read docs/COPILOT_LEARNINGS.md
+#   2. Group entries by category and look for patterns (3+ entries in the same
+#      category = strong signal that a rule should be added or strengthened)
+#   3. Draft a PR that updates .cursor/rules/ and/or project-prompt.mdc
+#   4. Close this issue when the PR is merged
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"  # Every Monday 9am UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-session-checklist:
+    # Regenerate docs/agent-context/session-checklist.md with the top-3
+    # Copilot catch categories from the last 30 days and open a PR. This runs
+    # BEFORE the issue-creation job so Phil sees both the updated file and the
+    # distillation prompt in the same weekly cycle.
+    name: Regenerate session-checklist hot-spots
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        # Pin to dev explicitly. On `schedule` / `workflow_dispatch`,
+        # actions/checkout defaults to the repo's default branch (`main`).
+        # Since we open the generated PR against `--base dev`, checking out
+        # main would produce a huge/incorrect diff of every dev-only change.
+        # Pinning here keeps branch → PR base aligned.
+        with:
+          ref: dev
+
+      - name: Compute top-3 categories from last 30 days
+        id: topcats
+        run: |
+          # Extract per-entry categories, counting each category separately so
+          # multi-category entries aggregate properly.
+          #
+          # LEARNINGS headings look like one of:
+          #   ### YYYY-MM-DD | PR #N | cat1, cat2, cat3
+          #   ### YYYY-MM-DD | PR #N | cat1 | author/suffix
+          #   ### YYYY-MM-DD | session retrospective | ... (skipped entirely)
+          #
+          # The previous implementation took only the FINAL `|` segment and
+          # counted the whole comma-joined string as a single category, so
+          # `i18n, testing, logging` never aggregated with `i18n, testing` and
+          # the top-3 ended up meaningless. It also pulled author suffixes
+          # (e.g. `MAX/Phil`) as a fake "category" when present.
+          #
+          # Heuristic for the category segment:
+          #   - Walk `|`-delimited fields from the LAST toward the first.
+          #   - Skip trailing fields that look like an author suffix
+          #     (contain `/` and match a known-author shape).
+          #   - The first non-author field is the category list. Split it on
+          #     commas and emit each token.
+          CUTOFF=$(date -u -d '30 days ago' +%Y-%m-%d)
+          awk -v cutoff="$CUTOFF" '
+            function trim(s) { gsub(/^ +| +$/, "", s); return s }
+            # True when a field looks like an author/attribution suffix
+            # (e.g. "MAX/Phil", "Phil/agent"). Real categories use slashes
+            # too (e.g. "security/guards"), so match only short single-slash
+            # suffixes whose tokens are capitalized names or the word "agent".
+            function is_author_suffix(s,   parts) {
+              if (s !~ /^[A-Za-z]+\/[A-Za-z]+$/) return 0
+              split(s, parts, "/")
+              # Treat as author if either side is "Phil", "MAX", "Hannah",
+              # "agent", or similarly human/actor-looking (avoids misfiring on
+              # "security/guards" where both sides are lowercase topic nouns).
+              return (parts[1] ~ /^(Phil|MAX|Hannah|agent)$/ || parts[2] ~ /^(Phil|MAX|Hannah|agent)$/)
+            }
+            /^### [0-9]{4}-[0-9]{2}-[0-9]{2}/ {
+              n = split($0, parts, "|")
+              split(parts[1], dparts, " ")
+              entry_date = dparts[2]
+              if (entry_date < cutoff) next
+
+              # Walk backward past any author-suffix field(s).
+              end = n
+              while (end > 2 && is_author_suffix(trim(parts[end]))) end--
+
+              cat_field = trim(parts[end])
+              if (cat_field ~ /^session retrospective/) next
+
+              # Split the category field on commas; emit each trimmed token.
+              m = split(cat_field, cats, ",")
+              for (i = 1; i <= m; i++) {
+                tok = trim(cats[i])
+                if (tok != "") print tok
+              }
+            }
+          ' docs/COPILOT_LEARNINGS.md | sort | uniq -c | sort -rn | head -3 > /tmp/top3.txt
+
+          if [ ! -s /tmp/top3.txt ]; then
+            echo "No categorized entries in the last 30 days — skipping regeneration."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Top-3 categories (count + name):"
+          cat /tmp/top3.txt
+
+      - name: Splice top-3 table into session-checklist.md (preserve curated mitigations)
+        if: steps.topcats.outputs.skip != 'true'
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          TARGET=docs/agent-context/session-checklist.md
+          TOP3=/tmp/top3.txt
+
+          # Single Python block so we can:
+          # 1. Parse the EXISTING Top-3 table into a {category: mitigation} map.
+          #    Mitigations are hand-curated over time; we must carry them forward
+          #    for any category still in the new top-3, or the file becomes stale
+          #    placeholder text every week.
+          # 2. Render a NEW table using the just-computed top-3 order/counts, and
+          #    preserve each category's existing mitigation. Only genuinely new
+          #    categories get the placeholder, tagged with today's date so a human
+          #    can see what needs manual curation.
+          # 3. Splice the new table between the "## Top 3 recurring categories"
+          #    heading and the next "## " heading.
+          python3 - "$TARGET" "$TOP3" "$TODAY" <<'PY'
+          import re
+          import sys
+          import pathlib
+
+          target_path, top3_path, today = sys.argv[1], sys.argv[2], sys.argv[3]
+          text = pathlib.Path(target_path).read_text()
+
+          # --- Step 1: parse existing top-3 table rows into category -> mitigation
+          existing_mitigations = {}
+          section_match = re.search(
+              r"## Top 3 recurring categories \(last 30 days\).*?(?=^## )",
+              text,
+              flags=re.S | re.M,
+          )
+          if section_match:
+              section = section_match.group(0)
+              # Table rows look like: | 1 | `category` | N+ | mitigation text |
+              # Multiple categories can share a single row via backtick-separated
+              # tokens (e.g. "`github-actions/triggers` + `github-actions/dedup`").
+              # Carry the mitigation forward for EACH referenced category.
+              row_re = re.compile(r"^\|\s*\d+\s*\|\s*(.+?)\s*\|\s*[^|]*\|\s*(.+?)\s*\|\s*$", re.M)
+              for m in row_re.finditer(section):
+                  cats_field, mitigation = m.group(1), m.group(2)
+                  for cat_match in re.finditer(r"`([^`]+)`", cats_field):
+                      existing_mitigations[cat_match.group(1)] = mitigation
+
+          # --- Step 2: read the just-computed top-3 (count + category)
+          top3 = []
+          for raw in pathlib.Path(top3_path).read_text().splitlines():
+              raw = raw.strip()
+              if not raw:
+                  continue
+              # uniq -c output: "   3 category-name-with-spaces"
+              parts = raw.split(None, 1)
+              if len(parts) != 2:
+                  continue
+              count_str, cat = parts
+              try:
+                  count = int(count_str)
+              except ValueError:
+                  continue
+              top3.append((count, cat))
+
+          # --- Step 3: render new table, preserving mitigations by category
+          lines = [
+              "| # | Category | Count | Mitigation before pushing |",
+              "|---|---|---|---|",
+          ]
+          for idx, (count, cat) in enumerate(top3, start=1):
+              mitigation = existing_mitigations.get(
+                  cat,
+                  f"_New category as of {today} — add mitigation (see matching entries in COPILOT_LEARNINGS.md)_",
+              )
+              lines.append(f"| {idx} | `{cat}` | {count}+ | {mitigation} |")
+          new_table = "\n".join(lines) + "\n"
+
+          new_section = (
+              "## Top 3 recurring categories (last 30 days)\n\n"
+              f"_Last updated: {today} (auto-regenerated by distill-learnings.yml — mitigations preserved from prior version)_\n\n"
+              + new_table
+              + "\n"
+          )
+          text = re.sub(
+              r"## Top 3 recurring categories \(last 30 days\).*?(?=^## )",
+              new_section,
+              text,
+              count=1,
+              flags=re.S | re.M,
+          )
+          pathlib.Path(target_path).write_text(text)
+          PY
+
+      - name: Open PR if the file changed
+        if: steps.topcats.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if git diff --quiet docs/agent-context/session-checklist.md; then
+            echo "No change to session-checklist.md — skipping PR."
+            exit 0
+          fi
+
+          BRANCH="chore/session-checklist-$(date -u +%Y-%m-%d)"
+
+          # De-dup BEFORE creating the local branch / pushing. If a prior
+          # run on the same day already opened the PR, the remote branch
+          # exists with commits not in `dev`, so a fresh `git push` would
+          # fail non-fast-forward. Check both the PR list and the remote
+          # branch explicitly.
+          EXISTING_PR=$(gh pr list --repo "$REPO" --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR already open at #$EXISTING_PR — skipping create to avoid duplicate."
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Remote branch $BRANCH already exists with no open PR — skipping to avoid non-fast-forward push. Delete the stale branch manually if needed."
+            exit 0
+          fi
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git checkout -b "$BRANCH"
+          git add docs/agent-context/session-checklist.md
+          git commit -m "chore: refresh session-checklist top-3 hot-spots"
+          git push origin "$BRANCH"
+
+          gh pr create --repo "$REPO" \
+            --base dev \
+            --head "$BRANCH" \
+            --title "chore: refresh session-checklist top-3 hot-spots" \
+            --body "Auto-generated by \`distill-learnings.yml\`. Agents read this file at session start to pre-audit for recurring Copilot catch patterns."
+
+  create-distillation-prompt:
+    name: Create learning distillation issue
+    runs-on: ubuntu-latest
+    # Run after the checklist refresh so a distillation cycle can reference the
+    # latest hot-spots. Failure in the checklist step must not block the issue.
+    needs: [update-session-checklist]
+    if: always()
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        # Pin to dev so the entry count reflects dev's latest LEARNINGS,
+        # not main's (which may lag dev by several merged PRs).
+        with:
+          ref: dev
+
+      - name: Count recent learnings entries
+        id: count
+        run: |
+          # Count entries added in the last 7 days
+          RECENT=$(grep -c "^### $(date -d '7 days ago' '+%Y')" docs/COPILOT_LEARNINGS.md 2>/dev/null || echo "0")
+          TOTAL=$(grep -c "^### [0-9]" docs/COPILOT_LEARNINGS.md 2>/dev/null || echo "0")
+          echo "recent=$RECENT" >> "$GITHUB_OUTPUT"
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if no new entries this week
+        if: steps.count.outputs.recent == '0'
+        run: |
+          echo "No new COPILOT_LEARNINGS entries this week — skipping distillation issue."
+
+      - name: Create distillation issue
+        if: steps.count.outputs.recent != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TOTAL: ${{ steps.count.outputs.total }}
+          RECENT: ${{ steps.count.outputs.recent }}
+        run: |
+          # Check if a distillation issue is already open (avoid duplicates)
+          EXISTING=$(gh issue list \
+            --repo "$REPO" \
+            --label "learning-distillation" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            echo "Distillation issue #$EXISTING already open — skipping"
+            exit 0
+          fi
+
+          # Ensure label exists
+          gh label create "learning-distillation" \
+            --color "bfd4f2" \
+            --description "Weekly prompt to distill Copilot learnings into cursor rules" \
+            --repo "$REPO" 2>/dev/null || true
+
+          # Build body via printf into a variable. Multi-line strings with
+          # markdown bold (**) or other YAML-special chars must never appear
+          # as unquoted literals directly in a run: block.
+          BODY=$(printf \
+            'Weekly Copilot Learnings Distillation\n\nNew entries this week: %s\nTotal entries in log: %s\n\nWhat to do\n\n1. Read docs/COPILOT_LEARNINGS.md in full\n2. Group entries by category - look for patterns:\n   - 3+ entries in the same category = strong signal a rule needs adding/strengthening\n   - Same root cause appears twice = add it to the pre-push self-check table\n   - A fix was non-obvious = consider adding an ESLint rule or CI check instead\n3. Draft a PR updating one or more of:\n   - .cursor/rules/git-pr-workflow.mdc\n   - .cursor/rules/project-prompt.mdc\n   - .github/copilot-instructions.md\n   - A new .cursor/rules/ file if a new domain is emerging\n4. Merge the PR (docs/rules PRs are safe to auto-merge per policy)\n5. Update the Distillation History table in COPILOT_LEARNINGS.md\n6. Close this issue\n\nGoal\n\nEvery entry in COPILOT_LEARNINGS.md should eventually become either:\n- A rule agents check before writing code (proactive)\n- A CI/lint check that catches it automatically (automated)\n- Or documented as an acceptable one-off (marked as such in the log)\n\nNothing should stay in the log as a recurring surprise.' \
+            "$RECENT" "$TOTAL")
+
+          gh issue create \
+            --repo "$REPO" \
+            --title "Weekly: distill Copilot learnings into cursor rules" \
+            --body "$BODY" \
+            --label "learning-distillation,agent-action-required"

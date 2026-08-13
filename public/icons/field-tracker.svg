@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Pin body -->
+  <path
+    d="M32 4C21.507 4 13 12.507 13 23c0 5.674 2.43 10.781 6.313 14.341L32 60l12.687-22.659C48.57 33.781 51 28.674 51 23 51 12.507 42.493 4 32 4z"
+    fill="#1B3A5C"
+  />
+  <!-- Pin head highlight ring -->
+  <circle cx="32" cy="23" r="10" fill="#0F7BAB" opacity="0.35"/>
+  <!-- Pin head inner -->
+  <circle cx="32" cy="23" r="6.5" fill="#38BDF8"/>
+  <!-- Centre dot -->
+  <circle cx="32" cy="23" r="2.5" fill="#ffffff"/>
+</svg>

@@ -1,0 +1,41 @@
+# Data Policy — No Proactive Mock Data
+
+## Rule
+
+**Never add mock, test, placeholder, or example data to migrations, seed scripts, or any code that runs automatically.**
+
+All application data is created by Phil through the app itself.
+
+## What belongs in migrations (allowed)
+
+Only rows the app **cannot function without**:
+
+| What | Why it's allowed |
+|---|---|
+| `roles` rows (ADMIN, MEMBER, etc.) | RBAC is broken without them — auth would fail on first request |
+| `permissions` rows | Same — `hasPermission()` would always return false |
+| `role_permissions` join rows | Same — roles would have no permissions |
+| Bootstrap admin account | One-time only, via `scripts/bootstrap-admin.ts`, skips if a user already exists |
+
+## What does NOT belong in migrations (forbidden)
+
+- Projects, units, project rows
+- Team members or users beyond the bootstrap admin
+- Lookup table rows (`scope_types`, `location_types`, `cost_types`, `install_teams`, `uom_types`, etc.)
+- Any row whose purpose is to make the app "look populated" during development
+- Anything described as "example", "placeholder", "sample", or "demo"
+
+## If dev-only seed data is ever needed
+
+Create `scripts/seed-dev.ts` — a standalone opt-in script Phil runs manually:
+```bash
+npm run seed:dev   # only if Phil explicitly asks for it
+```
+It must:
+- Guard with `if (process.env.NODE_ENV !== 'development') throw ...`
+- Never run as part of `dev:setup`, `db:migrate`, or any automatic pipeline
+- Be clearly marked `DEV ONLY` at the top of the file
+
+## Enforcement
+
+Before writing any migration or seed script, ask: "Is this data required for the app to start and authenticate?" If no → it does not go in a migration.

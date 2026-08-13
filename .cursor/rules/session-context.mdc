@@ -1,0 +1,220 @@
+---
+description: Auto-loads project context docs at the start of every agent session
+alwaysApply: true
+---
+
+# Session Startup
+
+> **MANDATORY — Phil's agent only:** Before making ANY substantive response — including when Phil's opening message is a task request — run the 5-command session checklist in `project-prompt.mdc` first. Do not skip it because "the user already has a task." Deploy failures and open issues must be surfaced before work begins, every session, no exceptions.
+
+## Step 1 — Load the agent context layer (always, takes ~30 seconds)
+
+Read `docs/agent-context/project-overview.md` first, then `docs/agent-context/session-checklist.md` to see the top-3 Copilot catch categories from the last 30 days (auto-regenerated weekly by `distill-learnings.yml`). The checklist primes you to pre-audit recurring patterns **before** writing code, not after Copilot flags them.
+
+Then load only the files relevant to the current task:
+
+| Task type | Load these |
+|-----------|-----------|
+| Backend / API route | `architecture.md`, `backend-patterns.md`, `api-endpoints.md` |
+| Database / migration | `database-schema.md`, `backend-patterns.md` |
+| Frontend / component | `frontend-patterns.md`, `architecture.md` |
+| Full-stack feature | `architecture.md`, `database-schema.md`, `backend-patterns.md`, `frontend-patterns.md`, `api-endpoints.md` |
+| Using a lib/ utility | `key-services.md` |
+| New developer / broad question | All 7 files in `docs/agent-context/` |
+
+These 7 files are the distilled, token-efficient source of truth. They replace scanning raw source files.
+
+## Step 2 — Load heavy docs only when the context layer doesn't answer your question
+
+- `DEV_NOTES.md` (project root) — deep setup instructions, environment parity, deployment walkthroughs, known caveats history
+- `PROJECT_TRACKER.md` (project root) — prototype session history, full key file map, pending feature backlog
+- `LAYOUT_RULES.md` (project root) — enforcement rules R1–R10 and full token table (already summarized in `frontend-patterns.md`)
+
+Do NOT load these three files at session start unless the task requires information they contain beyond what `docs/agent-context/` covers.
+
+## Agent Identity — Who Are You Helping?
+
+This repo is used by multiple developers (Phil, Hannah, RAD team), each running their own Cursor agent. Before acting on any session-level instructions:
+
+- **If you are Phil's agent** (`cp-build-dev` / Phil Amour): follow the full session startup including PR queue checks, `docs/ACTIVE_BRANCHES.md` read, and PENDING_REMINDERS as described in `project-prompt.mdc`. Note: agents do NOT auto-create or auto-merge PRs without Phil's explicit approval per session — see `git-pr-workflow.mdc`.
+- **If you are a contributor agent** (RAD dev, Hannah, or any team member other than Phil): skip the PR queue steps. Read `docs/ACTIVE_BRANCHES.md` to check for file ownership conflicts before starting work. Load the relevant `docs/agent-context/` files for the current task and follow the contributor workflow in `git-pr-workflow.mdc`. Do not attempt to merge PRs or run Railway CLI commands.
+
+## Multi-step guidance (walkthroughs with Phil)
+
+When walking Phil through a multi-step process (e.g. GCP setup, Railway deploy, CLI operations):
+
+- **Give all remaining steps upfront** in one message whenever possible — never make him ask "now what?"
+- **When Phil asks a clarifying question mid-walkthrough**, answer it briefly, then immediately restate all remaining steps from that point so he never loses his place
+- Keep step lists short and scannable — one action per line, no preamble
+- Do not re-explain steps he's already completed
+
+## Quick orientation (no file load needed)
+- Auth: NextAuth v5, JWT strategy, `DEV_BYPASS_AUTH=true` for local dev
+- Stack: Next.js 16, Prisma 7, PostgreSQL (Supabase), next-intl (EN + ES), Tailwind + CSS tokens
+- Mobile: bottom nav on mobile, side nav on desktop, `--top-bar-height: 56px` aligns all headers
+- Dev server: port 3002 (`npm run dev`)
+- Migrations: idempotent SQL in `prisma/migrations/`, mark applied with `prisma migrate resolve --applied`
+- DevTools in prod: requires `DEVTOOLS_ENABLED=true` Railway variable + ADMIN session
+
+## Deploy Timing
+
+The `record-timing` workflow job has been removed — it could never push directly to `dev`/`main` due to branch protection. Deploy durations are visible in the GitHub Actions UI. Skip the timing log step at session start.
+
+## After Any `prisma/schema.prisma` Change — Agent Runs the Restart
+
+**Whenever the agent edits `prisma/schema.prisma`**, it MUST immediately restart the dev server itself — never ask Phil to do it. The agent owns this fully.
+
+```bash
+# 1. Kill the running server
+npm run dev:kill
+
+# 2. Regenerate the Prisma client immediately (predev does this too, but run it now so
+#    any subsequent curl/health checks in the same response use the fresh client)
+npx prisma generate
+
+# 3. Pull latest + start server detached (survives agent shell exit)
+git pull origin dev
+npm run dev:start
+
+# 4. Confirm health — do not proceed until 200
+npm run dev:status
+```
+
+Do NOT proceed with testing, writing UI code, or any curl checks that hit the changed schema until after step 4 confirms the server is back up. The `predev` script runs `prisma generate` automatically on restart — step 2 above is an extra safety net for the same session.
+
+**Applying migrations locally:** use **`npm run db:deploy`** or **`npm run db:migrate`** only — never bare `npx prisma migrate deploy` / `npx prisma migrate dev`. Those npm scripts run the prod migrate guard first (see below).
+
+## Prisma migrations — production guard (mandatory)
+
+**Never run DDL against production from a laptop unless Phil explicitly requests it.**
+
+Local `prisma migrate deploy` / `migrate dev` use whatever `DATABASE_URL` / `DIRECT_URL` is in the shell — including credentials left over from prod Studio queries or a mis-set `.env`. That is how `20260604120000_calibration_target_clear_inspection` landed on prod Railway before PR #1046 merged.
+
+### Always use the guarded npm scripts
+
+| Command | Use for |
+|---------|---------|
+| `npm run db:deploy` | Apply pending migrations (`prisma migrate deploy`) |
+| `npm run db:migrate` | Create + apply a new migration (`prisma migrate dev`) |
+
+Both invoke `scripts/guard-migrate-target-cli.ts`, which **refuses** when the migrate connection fingerprint matches **`.env.prod.local`** (`DATABASE_URL` or `DIRECT_URL`).
+
+### Forbidden from the agent (unless Phil says otherwise)
+
+```bash
+# ❌ NEVER — bypasses guard; may hit prod if env is stale
+npx prisma migrate deploy
+npx prisma migrate dev
+```
+
+### Before any local migrate
+
+1. Confirm target: `npm run db:studio:check` (three distinct hosts for :5555 / :5556 / :5557).
+2. Ensure `.env` points at **local Docker** or **dev Supabase** — not prod Railway.
+3. If the shell previously sourced `.env.prod.local` or ran Railway prod queries, run `unset DATABASE_URL DIRECT_URL` and re-load `.env` before migrating.
+
+### Intentional prod migrate (Phil only)
+
+```bash
+ALLOW_PROD_MIGRATE=1 npm run db:deploy
+```
+
+Railway container boot (`scripts/railway-start.sh`) still runs bare `prisma migrate deploy` — that is correct; the guard is for **local/agent** runs only.
+
+## When a 500 on an API route may indicate a stale Prisma client
+
+Any time an API route returns 500 and the route references Prisma relations (especially after a schema change in the current session or a recent branch switch), the agent must:
+
+1. Check whether the generated client knows about the relevant model:
+   ```bash
+   grep -c "ModelName" node_modules/.prisma/client/index.js
+   ```
+2. If the count is 0 (model not in generated client) → the client is stale. **Run the restart sequence above immediately.** Do NOT tell Phil to restart — do it.
+3. If the count is > 0 → the client is current. Look for another cause (DB migration not applied, env var missing, code bug).
+
+## Starting the Dev Server — Required Pre-flight
+
+**Any time the dev server is started** — whether Phil requests it or the agent does it — use **`npm run dev:start`**, not bare `npm run dev` or `npm run dev &`. Cursor agent shell sessions exit and kill background jobs; the daemon script uses `nohup` + a pid file and survives.
+
+```bash
+git pull --ff-only   # or git pull origin dev when explicitly syncing dev
+npm run dev:start    # detached start + waits for /api/health 200
+npm run dev:status   # verify any time the app appears down
+```
+
+**Forbidden for agents:** `npm run dev &`, `npm run dev > /tmp/log &` without `scripts/dev-server-daemon.sh` — these die when the tool shell ends.
+
+**If `npm run dev:guarded` is running** in a terminal Phil opened, the memory guardian may stop the server when macOS reports critical RAM pressure (see `.guardian.log`). Run `npm run dev:restart` after pressure normalizes.
+
+This applies unconditionally. Do not skip the pull even if the local branch appears current. The `predev` script's `check-dev-updates.sh` will warn and exit if the branch is behind origin/dev; pulling first prevents that interruption.
+
+## ngrok Tunnel — Agent Owns This, Never Asks Phil
+
+**The agent is responsible for keeping ngrok running.** Phil must never be asked to start, restart, or check ngrok. Any time Phil mentions the tunnel isn't working, or any time the agent needs the tunnel and hasn't verified it is live, the agent starts it immediately.
+
+### Why allowedDevOrigins is required
+
+ngrok adds an `X-Forwarded-Host` header that Next.js 16 uses for its cross-origin check on dev resources. `allowedDevOrigins` in `next.config.ts` whitelists ngrok hostnames so HMR and RSC endpoints are not blocked.
+
+**Never remove `allowedDevOrigins` from `next.config.ts`.**
+
+> **Note:** The `--host-header` flag was removed in ngrok 3.x (deprecated, causes silent exit). Do NOT use it. Plain `ngrok http 3002` is correct.
+
+### How to start the tunnel (agent always uses this exact sequence)
+
+`npm run tunnel &` is unreliable from a shell tool call — the process exits immediately because the shell session is non-interactive. **Always use `nohup` with the absolute ngrok path:**
+
+```bash
+# Kill any stale ngrok process
+pkill -f "ngrok http" 2>/dev/null; sleep 1
+
+# Start with nohup so it survives the shell session ending
+NGROK_BIN=$(which ngrok)
+nohup "$NGROK_BIN" http 3002 > /tmp/ngrok.log 2>&1 &
+
+# Wait for tunnel to establish, then verify
+sleep 10
+curl -sf http://localhost:4040/api/tunnels \
+ | python3 -c "import sys,json; t=json.load(sys.stdin)['tunnels']; [print(x['public_url']) for x in t]"
+```
+
+If the `curl` returns a URL → tunnel is live. Report it to Phil.
+If the `curl` returns nothing → wait 5 more seconds and try once more. If still nothing, check `/tmp/ngrok.log` for errors.
+
+### How to check if the tunnel is already running
+
+```bash
+curl -sf http://localhost:4040/api/tunnels \
+  | python3 -c "import sys,json; t=json.load(sys.stdin)['tunnels']; [print(x['public_url']) for x in t]" \
+  || echo "NO TUNNEL"
+```
+
+A non-empty URL = tunnel live. `NO TUNNEL` or any error = not running — start it immediately using the sequence above. **Never check with `pgrep`, `ps`, or `lsof` — process existence ≠ tunnel established.**
+
+### Session start — proactive tunnel check
+
+At the start of every session where Phil is likely using the PWA or ngrok (i.e., any session involving mobile testing, the test project, or observations/issues/field work), the agent must check the tunnel status as part of the session checklist. If it is not running, start it before reporting status to Phil.
+
+### Full startup sequence (dev server + tunnel together)
+
+```bash
+# 1. Kill stale processes
+npm run dev:kill
+pkill -f "ngrok http" 2>/dev/null; sleep 1
+
+# 2. Pull + start dev server detached (survives agent shell exit)
+git pull --ff-only || git pull origin dev
+npm run dev:start
+
+# 3. Confirm health
+npm run dev:status
+
+# 4. Start tunnel with nohup
+NGROK_BIN=$(which ngrok)
+nohup "$NGROK_BIN" http 3002 > /tmp/ngrok.log 2>&1 &
+sleep 10
+
+# 5. Confirm tunnel URL
+curl -sf http://localhost:4040/api/tunnels \
+  | python3 -c "import sys,json; t=json.load(sys.stdin)['tunnels']; [print(x['public_url']) for x in t]"
+```

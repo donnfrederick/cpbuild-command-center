@@ -1,0 +1,101 @@
+---
+description: Plan mode calibration — always ask yes/no vision questions before finalizing any plan
+alwaysApply: true
+---
+
+# Plan Mode Calibration Protocol
+
+When Phil asks to make a plan for anything, do NOT immediately generate a plan and present it. First calibrate shared understanding using the process below.
+
+## The Calibration Process
+
+### Step 0 — Pre-flight: search prior learnings
+
+Before starting calibration, search the compound knowledge base for anything relevant to the user's request. `docs/COPILOT_LEARNINGS.md` is the canonical log; `.cursor/rules/` holds the distilled rules.
+
+1. Extract 3–5 keywords from Phil's request (e.g. "workflow", "push to dev", "schema change", "i18n", "Copilot review").
+2. Run a grep pass across the knowledge base:
+
+```bash
+rg -i -l '<keyword>' docs/COPILOT_LEARNINGS.md .cursor/rules/
+```
+
+Or use the Grep tool with `pattern: '<keyword>'` and `path: 'docs/COPILOT_LEARNINGS.md'` / `.cursor/rules/`.
+
+3. If any match, read the matching entries/rows before generating the draft plan.
+4. Cite any applied learning inline in the draft or in the Self-review footer (e.g. "Applying learning from `COPILOT_LEARNINGS.md` 2026-04-17 entry: workflows that push to `dev` must use `peter-evans/create-pull-request`, not `git push`").
+
+Zero-match is a valid outcome and requires no action — it just means the request is in genuinely new territory. The agent's "when in doubt, read the full log" fallback still applies for ambiguous cases.
+
+### Step 1 — State your understanding, ask for confirmation
+
+Frame every calibration question as a statement of what YOU think is true, then ask "Is that right?" with only two options: **Yes, that's it** / **No, not quite**.
+
+```
+I think the reason we're doing this is: [your interpretation].
+Is that right?
+  ✅ Yes, that's it
+  ❌ No, not quite
+```
+
+### Step 2 — For every "No" answer, follow up immediately
+
+Do not move on. Ask a targeted follow-up to understand the correct interpretation before continuing calibration.
+
+### Step 3 — Cover these dimensions before finalizing any plan
+
+| Dimension | Question pattern |
+|-----------|-----------------|
+| **Why** | What is the actual reason / motivation for this? |
+| **What** | What exactly are we doing — and what are we NOT doing? |
+| **How controlled** | What does "controlled" or "safe" mean here specifically? |
+| **Who** | Who is affected or involved beyond just us? |
+| **When** | Is there a trigger, deadline, or sequencing concern? |
+
+Not every plan needs all five. Use judgment — stop when you're confident the vision is shared.
+
+### Step 3.5 — Self-adversarial pass on the draft
+
+Before calling `CreatePlan`, answer the following five questions **about your own draft plan**. Write the answers into the plan's closing `## Self-review` section (see Output contract below). If any answer surfaces a real problem, adjust the draft before you generate the plan.
+
+| Lens | Question |
+|------|---------|
+| **Scope** | Is there a simpler version of this that would still solve Phil's actual problem? If yes, what is it, and why am I recommending the larger version? |
+| **Feasibility** | What is the riskiest technical assumption in this plan? If it turns out wrong, does the plan still work, or does it collapse? |
+| **Product lens** | Am I solving what Phil asked for, or am I solving an adjacent problem I find more interesting? Cite the specific user ask this plan maps to. |
+| **Hidden assumption** | What am I taking for granted about the codebase, infra, data shape, or team process that I haven't verified this session? |
+| **Rollback** | If this plan ships and turns out wrong, how do we back it out? Is each step independently revertable? |
+
+### Step 4 — Generate the plan with a visible Self-review section
+
+After Steps 1–3.5 are complete, produce the plan with `CreatePlan`. Do not produce a draft plan before calibration unless Phil explicitly asks you to skip it.
+
+**Output contract — every `CreatePlan` output ends with a `## Self-review` section.**
+
+```markdown
+## Self-review
+
+- **Scope:** <one sentence — concrete, not generic>
+- **Feasibility:** <one sentence — name the specific riskiest assumption>
+- **Product lens:** <one sentence — cite the user ask>
+- **Hidden assumption:** <one sentence — name one concrete assumption>
+- **Rollback:** <one sentence — how the plan backs out>
+```
+
+Rules for the Self-review section:
+
+- **All five lines are always present**, even if nothing changed during Step 3.5. A zero-finding self-review is also a signal — it tells Phil the agent ran the pass.
+- **Each answer must be specific**, not boilerplate. "No issues found" / "looks good" / "nothing to flag" are not acceptable answers — they mean the pass was skipped. If nothing is genuinely flagged, still state the concrete thing you checked (e.g. "Scope: considered a 1-file version that only adds the learnings-search step; rejected because the adversarial pass is where most of the per-plan value lives").
+- **If the draft changed because of the pass**, add a short "Changed from draft:" suffix on the affected line (e.g. "Feasibility: initial draft assumed MCP migration; dropped after feasibility check — cost exceeded benefit. Changed from draft: removed MCP step.").
+- **Do not move the Self-review section.** It is always the final section of the plan.
+
+## When Phil Says "Calibrate the Plan"
+
+This is an explicit trigger to enter the yes/no calibration loop on an existing plan. Ask calibration questions about each major assumption in the current plan until Phil confirms or corrects each one.
+
+## Anti-patterns to Avoid
+
+- Do NOT ask open-ended "what do you want?" questions — state what you think and ask for confirmation
+- Do NOT generate a full plan and then ask "does this look right?" — calibrate first, build second
+- Do NOT ask more than 3 questions at a time — batch them but keep it scannable
+- Do NOT skip calibration because the task "seems obvious"

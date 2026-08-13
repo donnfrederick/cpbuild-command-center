@@ -1,0 +1,56 @@
+name: Field Daily Scheduled Generate
+
+# Runs hourly at :10 UTC; the API only generates during the org-TZ midnight hour
+# (America/Denver by default). Use workflow_dispatch with force for manual backfill.
+
+on:
+  schedule:
+    - cron: "10 * * * *"
+  workflow_dispatch:
+    inputs:
+      report_date:
+        description: "Optional YYYY-MM-DD override (prior day default)"
+        required: false
+        type: string
+      force:
+        description: "Run even outside org-TZ midnight hour"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  scheduled-generate:
+    name: Generate field daily reports
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call scheduled generate endpoint
+        env:
+          CRON_SECRET: ${{ secrets.FIELD_DAILY_CRON_SECRET }}
+          APP_URL: ${{ vars.FIELD_DAILY_CRON_APP_URL }}
+          REPORT_DATE: ${{ github.event.inputs.report_date }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "FIELD_DAILY_CRON_SECRET is not configured — skipping."
+            exit 0
+          fi
+          if [ -z "$APP_URL" ]; then
+            echo "FIELD_DAILY_CRON_APP_URL repo variable is not set — skipping."
+            exit 0
+          fi
+          FORCE=false
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            FORCE="${{ github.event.inputs.force }}"
+            if [ -z "$FORCE" ]; then
+              FORCE=true
+            fi
+          fi
+          BODY='{}'
+          if [ -n "$REPORT_DATE" ]; then
+            BODY=$(printf '{"date":"%s","force":%s}' "$REPORT_DATE" "$FORCE")
+          elif [ "$FORCE" = "true" ]; then
+            BODY='{"force":true}'
+          fi
+          curl -sfS -X POST "${APP_URL%/}/api/internal/field-daily/scheduled-generate" \
+            -H "Authorization: Bearer ${CRON_SECRET}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY"

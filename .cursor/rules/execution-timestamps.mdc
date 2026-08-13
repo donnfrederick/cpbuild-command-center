@@ -1,0 +1,55 @@
+---
+description: Instructs the agent to include wall-clock timestamps during long-running and multi-step operations so Phil always has temporal context in the chat timeline.
+alwaysApply: true
+---
+
+# Execution Timestamps
+
+## When to Include Timestamps
+
+Include a `[HH:MM:SS]` timestamp prefix in your chat response **at every meaningful phase boundary** during:
+
+- Any deployment or Railway CLI operation
+- Any CI / GitHub Actions polling loop
+- Any multi-step test run (`npm run build`, `npm run test:*`)
+- Any operation expected to take >10 seconds
+- Any "waiting for..." status update
+- The start and end of every agent session checklist
+
+## Format
+
+Use 12-hour time with AM/PM inline with the action summary:
+
+```
+[4:32:07 PM] Starting deploy to dev — merging PR #42...
+[4:32:51 PM] Deploy workflow run is up — watch in Actions: https://github.com/.../runs/<id>
+[4:45:02 PM] ✅ Deploy receipt — workflow succeeded; health: 200 OK.
+```
+
+For merges to `dev`/`main`, follow **`git-pr-workflow.mdc` → hand off to GitHub Actions**: timestamp the **single** workflow handoff and the **final receipt** (or failure)—not a long chat poll loop while the run is in progress (Phil monitors the Actions graph).
+
+## How to Get the Current Time
+
+In shell commands, use `date +"%l:%M:%S %p" | sed 's/^ //'` to print the timestamp alongside output:
+
+```bash
+echo "[$(date +"%l:%M:%S %p" | sed 's/^ //')]  Running unit tests..."
+npm run test:unit
+echo "[$(date +"%l:%M:%S %p" | sed 's/^ //')] Unit tests complete."
+```
+
+For polling loops, echo the timestamp on each iteration so the chat log shows elapsed time:
+
+```bash
+for i in $(seq 1 20); do
+  echo "[$(date +"%l:%M:%S %p" | sed 's/^ //')] Checking deploy status (attempt $i)..."
+  # ... check logic ...
+  sleep 15
+done
+```
+
+## What NOT to Timestamp
+
+- Single-file reads or edits (too noisy)
+- Lint passes that complete in <3 seconds
+- Conversational replies with no execution happening

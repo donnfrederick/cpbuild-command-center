@@ -1,0 +1,62 @@
+---
+description: Test-first debug protocol for any non-cosmetic bug fix
+alwaysApply: true
+---
+
+# Test-First Debug Protocol
+
+When fixing any non-cosmetic bug — whether reported by Phil, caught by Copilot, surfaced by a failing test, or noticed during work — follow this four-step protocol. Test-first is not optional: it guarantees the fix addresses the actual root cause, because a regressing test proves the fix did something.
+
+## The four steps (mandatory)
+
+### Step 1 — State the causal chain
+
+Write the hypothesis as a chain, one paragraph: `user action X → code path Y → state Z → observed failure W`. Be specific — name the function, the file, the field, the HTTP status, the branch of the conditional. "Probably a race condition somewhere" is not a causal chain. "User clicks Save → `PATCH /api/projects/:id` handler in `app/api/projects/[id]/route.ts` enters the validation branch with `status: null` → Zod schema rejects because `status` is `z.string().min(1)` → 422 surfaces as generic error toast" is a causal chain.
+
+If you cannot state a specific chain, you do not yet understand the bug. Reproduce manually, add logging, read the code — do not guess.
+
+### Step 2 — Reproduce with a failing test
+
+Write a test that exercises the hypothesis and **fails against the current code**. Unit test preferred; integration test if the surface genuinely needs one (API route, multi-service flow, database transaction).
+
+- Run the test. It must FAIL. If it passes, the hypothesis from Step 1 is wrong — go back to Step 1.
+- The test's assertion should be the observable symptom, not an implementation detail. "Expect POST to return 200" not "Expect `validateSchema` to be called with specific args."
+
+### Step 3 — Fix
+
+Only now write the code fix. The previously-failing test must pass, and no other tests regress. Run the full affected test file, not just the one new test.
+
+### Step 4 — Compound
+
+Before closing the loop, check whether this bug matches an existing pattern:
+
+- If it matches a row in `project-prompt.mdc` Pre-Push Self-Check matrix, reference that row in the commit message ("applies existing Pre-Push row: `let x;` split-declaration"). This tells Phil the rule caught the class, even if this specific instance slipped through — no new rule needed.
+- If the pattern is novel — not covered by any existing row — draft a `docs/COPILOT_LEARNINGS.md` entry in the PR description and propose a new Pre-Push row. Do not add the row yourself yet; let Phil decide whether the pattern is frequent enough to warrant one more line in the matrix.
+
+## Exceptions (explicitly documented — not loopholes)
+
+These are the only cases where the protocol's steps 1–2 may be skipped. All other fixes follow the four steps.
+
+| Exception | What you can skip | What you still owe |
+|-----------|------------------|---------------------|
+| **Cosmetic** — typo, whitespace, comment, formatting-only | Steps 1–2. Just fix. | Nothing. |
+| **Config-only** — env var default, JSON config, i18n string key correction, non-behavioral markdown | Step 2 (test) if no test framework covers the surface. | Step 1 causal chain in the commit message, even if it's two sentences. |
+| **Prod-down emergency** — production is broken, minutes matter | Steps 1–2 in-flight. Fix immediately. | Regression test in a follow-up PR within 24 hours, tracked as an unchecked `[ ]` item in `docs/PENDING_REMINDERS.md`. No exceptions on the 24h deadline — if the test isn't written within a day, the emergency exception has been abused. |
+
+Three rules about the exceptions:
+
+1. **They are claims, not assertions.** When you invoke one, state it in the commit message: `fix(api): correct env var default (config-only exception, no regression test needed)`. Phil reads the commit; if the claim is wrong, the rule is re-enforced.
+2. **"Small" is not an exception.** A one-line fix that changes behavior still needs a test. A one-line fix in a config file does not.
+3. **"I don't know how to test this" is not an exception.** Ask Phil. If the surface is genuinely untestable in this codebase, document *why* in the commit message, and add an item to `PENDING_REMINDERS.md` to make it testable.
+
+## Cross-reference
+
+- Pre-Push Self-Check rows in `project-prompt.mdc` catch classes of bugs at push time. This protocol catches root causes at fix time. They are complementary — the Pre-Push matrix prevents future bugs; the debug protocol validates the fix for the current one.
+- `testing.mdc` governs test coverage for **feature work** — "every code change requires corresponding tests, no exceptions." This protocol's three exceptions (cosmetic, config-only, prod-down) apply only to the **test-writing step of bug fixes**, not to feature PRs. A new feature always needs tests per `testing.mdc`, regardless of what this file says about bug-fix exceptions.
+
+## Anti-patterns
+
+- **Fix first, test later "if I have time."** You will not have time. The test is the fix's proof of work.
+- **Test that passes without the fix.** The test is worthless unless it fails against the bug. If you can't make it fail, you haven't reproduced the bug.
+- **"Exploratory fix" — change something, see if it helps.** This is guessing. Go back to Step 1.
+- **Skipping Step 4 because "this is just a small one-off."** A bug that reaches fix-stage is by definition frequent enough to cost time. Compound-check it or the next instance will cost the time again.

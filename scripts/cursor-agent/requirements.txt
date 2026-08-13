@@ -1,0 +1,21 @@
+# Cursor Voice Agent — Python dependencies
+# Install with: pip3 install -r requirements.txt
+#
+# System prerequisite (run once before pip install):
+#   sudo chown -R $(whoami) /opt/homebrew /opt/homebrew/Cellar /opt/homebrew/bin /opt/homebrew/lib /opt/homebrew/include /opt/homebrew/opt
+#   brew install portaudio
+
+# Wake word detection (Picovoice Porcupine — free tier)
+pvporcupine>=3.0.0
+
+# Audio I/O — sounddevice bundles its own PortAudio, no brew install needed
+sounddevice>=0.4.6
+
+# Local speech-to-text (runs entirely offline, ~75MB model download on first run)
+openai-whisper>=20231117
+
+# Gemini API (smart filtering + preference learning)
+google-generativeai>=0.8.0
+
+# Utilities
+numpy>=1.24.0

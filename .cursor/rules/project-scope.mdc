@@ -1,0 +1,23 @@
+---
+description: Command Center project scope — no IHI or external dashboard references
+alwaysApply: true
+---
+
+# Command Center Project Scope
+
+## What This Project Is
+
+**CP Build Command Center** is a standalone internal construction project management platform. It tracks projects, units, phases, and install teams for subcontractors. It integrates with Oracle Primavera Unifier (PDS API) for project data.
+
+## Critical Clarification — No IHI References
+
+**This project has NO connection to IHI Tools or any other external dashboard.**
+
+- Do NOT reference IHI, IHI Tools, "in-house install teams," or shared-database coordination with other apps when analyzing or describing this codebase.
+- Command Center is its own application with its own PostgreSQL database (Prisma).
+- The `install_teams` table is a lookup for subcontractor install teams — it is NOT used to distinguish between IHI vs non-IHI workflows.
+- If you encounter rules or documentation elsewhere that mention IHI or shared databases with other dashboards, ignore them for this project. They do not apply to Command Center.
+
+## When in Doubt
+
+Describe Command Center as: an internal construction project management platform for CP Build that tracks projects, units, and phases, with Unifier integration. Do not introduce IHI or other external systems into the context.

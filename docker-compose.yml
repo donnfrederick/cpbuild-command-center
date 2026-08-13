@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: commandcenter_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: commandcenter
+    ports:
+      # Host port is configurable via POSTGRES_PORT in .env (default: 5433 to avoid conflicts)
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d commandcenter"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: commandcenter_mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"   # SMTP — used by the app to send emails locally
+      - "8025:8025"   # Web UI — open http://localhost:8025 to read emails
+    environment:
+      MP_MAX_MESSAGES: 500
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+volumes:
+  postgres_data:
+    driver: local

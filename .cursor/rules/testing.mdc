@@ -1,0 +1,162 @@
+---
+description: Testing mandate for CP Build Command Center — every change must be covered
+alwaysApply: true
+---
+
+# Testing Standards — CP Build Command Center
+
+Every code change requires corresponding tests. No exceptions. This dashboard will grow
+into a complex system; tests are how we guarantee it never breaks silently.
+
+## Test Types Required
+
+| What you're changing | Required tests |
+|---|---|
+| Pure utility / lib function | Unit test in `__tests__/unit/` |
+| React component | Unit test (render + interaction) in `__tests__/unit/` |
+| API route handler | Integration test in `__tests__/integration/` |
+| Full user flow (auth, form, navigation) | E2E test in `e2e/` |
+| Permission / auth logic | Unit + integration |
+| New DevTools panel | Unit test for the component |
+
+## Directory Layout
+
+```
+__tests__/
+  unit/          # Vitest — isolated, no DB, no network
+  integration/   # Vitest + MSW — API handlers with mocked DB
+e2e/             # Playwright — real browser, running app
+```
+
+## Unit Tests (`__tests__/unit/`)
+
+- Use `vitest` + `@testing-library/react` + `@testing-library/user-event`
+- Mock all external dependencies (db, auth, fetch)
+- One `describe` block per function/component
+- Name: `<subject>.unit.test.ts(x)`
+
+```typescript
+// ✅ GOOD — isolated, fast, no side effects
+import { hasPermission } from "@/lib/permissions";
+describe("hasPermission()", () => {
+  it("returns false when MEMBER checks INVITE_MEMBER", () => {
+    expect(hasPermission("MEMBER", "invite:member")).toBe(false);
+  });
+});
+```
+
+## Integration Tests (`__tests__/integration/`)
+
+- Use MSW (`msw/node`) to mock fetch calls inside handlers
+- Test the route handler logic end-to-end (request → response)
+- Must test: happy path, auth failure (401), bad input (400), forbidden (403)
+- Name: `<subject>.integration.test.ts`
+
+```typescript
+// ✅ GOOD — tests the full handler chain, mocked DB
+import { GET } from "@/app/api/offline/preferences/route";
+vi.mock("@/lib/db", () => ({ db: { offlinePreference: { findUnique: vi.fn() } } }));
+```
+
+### External-API Fixture Rule (CRITICAL)
+
+Any API route that accepts data sourced from an external system (Unifier, Salesforce, etc.) **must** include at least one integration test fixture where each nullable field is `null`, `""`, or omitted entirely. Never let every fixture use a tidy non-empty value for a field the external system can legitimately leave blank.
+
+Fields that Unifier can return as `null` or absent: `projectManagerName`, `clientName`, `address`, `location`, `status`, `projectPhase`, `estimatorName`, `installManagerName`, `startDate`, `fieldDueDate`.
+
+```typescript
+// ✅ REQUIRED — cover the null/empty case alongside the happy path
+it("accepts project with no PM assigned (Unifier returns null)", async () => {
+  const res = await POST(new Request("...", {
+    body: JSON.stringify({ projectName: "X", siteLocation: "Y", projectManagerName: "", unifierPid: "1" }),
+  }));
+  expect(res.status).toBe(201);
+});
+
+// ❌ FORBIDDEN — every fixture uses "PM"; no test for the null case
+// projectManagerName: "PM"  ← always non-empty means you never test the empty path
+```
+
+### Form Component Rule
+
+Any React form component that submits data to an API must have a unit test that:
+1. Renders with a fixture where at least one field is `null` or empty (mirroring real data)
+2. Verifies the resulting API call does not fail schema validation
+
+## E2E Tests (`e2e/`)
+
+- Use Playwright, run against a live dev server
+- Cover complete user journeys, not individual UI states
+- Use `--headed` locally to watch actions in real-time
+- Keep each spec focused on ONE workflow
+- Name: `<workflow>.spec.ts`
+
+## Coverage Targets
+
+- Utilities / lib: **90%+**
+- API routes: **80%+** (integration)
+- Components: **70%+** (unit)
+- Critical paths (auth, permissions): **100%**
+
+## After Every Change
+
+```bash
+npm run test:unit          # fast unit suite — always run locally
+npm run test:integration   # integration suite
+npm run test:smoke         # smoke E2E — catches broken routes
+npm run test:coverage      # full coverage report before PR
+```
+
+## Continuous Test Maintenance — Required on Every File You Touch
+
+Whenever a file is modified (source or test), the agent must:
+
+### 1. Audit coverage of the entire file being edited
+
+Do not only add tests for the lines you changed. Check the existing test file for the module
+and identify any exported functions, branches, or behaviours that have **no test at all**.
+Add coverage for those gaps in the same PR as the source change.
+
+Priority:
+- Functions with no describe block → add a full suite
+- Async functions that call external dependencies (db, session, cookies) → ensure mocks are configured and both success + failure paths are covered
+- Role/permission-sensitive code paths → always test the non-permitted case
+
+### 2. Review existing tests for accuracy
+
+Before committing, read the existing tests in the file you are modifying and ask:
+- Does this test still describe what the app actually does?
+- Would this test catch a real regression, or is it just asserting implementation details?
+- Are the mock return values plausible (e.g. not hardcoding values the real system would never return)?
+
+If an existing test is stale, misleading, or tests the wrong thing — fix or remove it in the same PR.
+
+### 3. Calibrate assumptions with Phil before writing new tests
+
+Whenever a test scenario requires an assumption about product behaviour (e.g. "which roles can see X?", "what does an empty response look like?", "should previewing as role Y block Z?"), **ask Phil to confirm before writing the test**. Use the AskQuestion tool with concrete yes/no or multiple-choice options.
+
+Do NOT write tests based on guesses. A test that asserts incorrect expected behaviour is worse than no test.
+
+### 4. Flag dead-code tests honestly
+
+If a test passes but the behaviour it is testing no longer exists (e.g. a filter that no data currently matches), add an inline comment documenting this:
+
+```typescript
+// NOTE: No current tour steps navigate to /users, so this filter is currently
+// a no-op. This test documents the intent for when /users steps are added.
+it("omits /users steps for roles without VIEW_DASHBOARD", ...)
+```
+
+Do not silently keep tests that assert coincidentally-passing conditions.
+
+## Consistency Checklist (run before every commit)
+
+- [ ] New code has matching test file
+- [ ] Existing tests in touched files are still accurate (reviewed, not just passing)
+- [ ] Coverage gaps in touched files are addressed or tracked
+- [ ] `npm run test:unit` passes
+- [ ] `npm run lint` passes  
+- [ ] `npm run build` passes (no TS errors)
+- [ ] No hardcoded test credentials in committed code
+- [ ] Tests describe BEHAVIOUR, not implementation details
+- [ ] Any assumption about expected behaviour was confirmed with Phil before asserting it in a test

@@ -1,0 +1,2171 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Roles are stored in DB for admin flexibility. Seed script populates defaults.
+model Role {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users         User[]
+  invites       Invite[]
+  permissions   RolePermission[]
+
+  @@map("roles")
+}
+
+/// Permission codes used for authorization. Admins assign permissions to roles.
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role        Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission  Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  name          String?
+  image         String?
+  passwordHash  String?
+  roleId        String
+  role          Role       @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  status        UserStatus @default(ACTIVE)
+
+  /// Login-security: tracks failed attempts and account lockout
+  failedLoginAttempts Int       @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts               Account[]
+  sessions               Session[]
+  invitesSent            Invite[]                @relation("InviteSender")
+  offlinePreference      OfflinePreference?
+  offlineProjectSyncs    OfflineProjectSync[]
+  specialPermissions     UserSpecialPermission[] @relation("UserPermissions")
+  permissionsGranted     UserSpecialPermission[] @relation("GrantedByUser")
+  feedbackReports        FeedbackReport[]
+  assignedFeedbackReports FeedbackReport[]      @relation("FeedbackAssignee")
+  notifications          Notification[]
+  passwordResetTokens    PasswordResetToken[]
+  releaseVerifications   ReleaseVerification[]
+  environmentVisits      EnvironmentVisit[]
+  masqueradeSessions     MasqueradeLog[]         @relation("MasqueradeActor")
+  backlogItems           BacklogItem[]
+  masqueradeTargets      MasqueradeLog[]         @relation("MasqueradeTarget")
+  subScopesCreated       ProjectSubScope[]       @relation("SubScopeCreatedBy")
+  issuesCreated          ProjectIssue[]          @relation("IssueCreator")
+  issuesResolved         ProjectIssue[]          @relation("IssueResolver")
+  issueComments          IssueComment[]          @relation("IssueCommentAuthor")
+  observationsAuthored   ProjectObservation[]    @relation("ObservationAuthor")
+  observationComments    ObservationComment[]    @relation("ObsCommentAuthor")
+  feedbackComments       FeedbackComment[]       @relation("FeedbackCommentAuthor")
+  feedbackMentions       FeedbackMention[]       @relation("FeedbackMentionUser")
+  mediaUploads           MediaAttachment[]       @relation("MediaUploader")
+  apiKeys                ApiKey[]                @relation("ApiKeyCreator")
+  assignedApiKeys        ApiKey[]                @relation("ApiKeyAssignee")
+  mediaLastMarked        MediaAttachment[]       @relation("MediaLastMarked")
+  formsCreated           Form[]                  @relation("FormCreator")
+  formVersionsPublished  FormVersion[]           @relation("FormVersionPublisher")
+  clearInspectionsPerformed ClearInspection[]    @relation("ClearInspectionInspector")
+  testSeedBatchesCreated TestSeedBatch[]         @relation("TestSeedBatchCreator")
+  customSiteLocationsCreated ProjectCustomSiteLocation[] @relation("CustomSiteLocationCreator")
+  projectFavorites       UserProjectFavorite[]
+  announcementDismissals AppAnnouncementDismissal[]
+  fieldDailyReports      FieldDailyReport[]      @relation("FieldDailyReportInstallManager")
+  fieldDailyReportSectionNotes FieldDailyReportSectionNote[] @relation("FieldDailyReportSectionNoteAuthor")
+  fieldDailyReportSectionNoteReplies FieldDailyReportSectionNoteReply[] @relation("FieldDailyReportSectionNoteReplyAuthor")
+  fieldDailyReportDailyManpowerSets FieldDailyReportProject[] @relation("FieldDailyReportDailyManpowerSetBy")
+  projectNotesAuthored              ProjectNote[]             @relation("ProjectNoteAuthor")
+
+  /// Unifier PDS user link — set when this CC user is matched to a Unifier account.
+  unifierUserId   String?   @unique
+  unifierUsername String?
+
+  /// Agent identity — each user names their Cursor AI agent for attribution and the org chart.
+  agentName      String?
+  agentCallsign  String?
+  agentMission   String?
+
+  @@index([roleId])
+}
+
+/// Password reset tokens. One-use. Expiry is variable: 1 hour for self-service
+/// (forgot-password flow) and 72 hours for admin-issued links.
+/// tokenHash is a SHA-256 hash of the raw token — never store the raw token.
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@map("password_reset_tokens")
+  @@index([userId])
+}
+
+/// Per-user override permissions granted regardless of role.
+/// Used to elevate a specific user's access without changing their role.
+/// Example: giving an INSTALL_MANAGER the invite:member permission temporarily.
+model UserSpecialPermission {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation("UserPermissions", fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Permission code from PERMISSIONS catalog (e.g. "invite:member")
+  permission   String
+
+  /// Who granted this — null if bootstrapped or user deleted
+  grantedById  String?
+  grantedBy    User?    @relation("GrantedByUser", fields: [grantedById], references: [id], onDelete: SetNull)
+
+  /// Optional note explaining why this was granted
+  note         String?
+
+  grantedAt    DateTime @default(now())
+
+  @@unique([userId, permission])
+  @@index([userId])
+  @@map("user_special_permissions")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Invite {
+  id         String    @id @default(cuid())
+  email      String
+  token      String    @unique @default(cuid())
+  roleId     String
+  role       Role      @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  sentBy   User   @relation("InviteSender", fields: [sentById], references: [id])
+  sentById String
+
+  @@index([roleId])
+}
+
+/// Per-user offline sync preferences. Stores which data modules the user
+/// wants available when they are on-site without a reliable connection.
+model OfflinePreference {
+  id                String               @id @default(cuid())
+  userId            String               @unique
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Array of module IDs the user has enabled for offline use.
+  /// Seeded modules: "team-directory". More added as tools are built.
+  modules           String[]             @default([])
+  /// Array of project IDs the user has opted in to cache offline.
+  offlineProjectIds String[]  @default([])
+  syncedAt          DateTime?
+  updatedAt         DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+/// Tracks the last time a specific project was synced for offline use per user.
+model OfflineProjectSync {
+  id        String   @id @default(cuid())
+  userId    String
+  projectId String
+  syncedAt  DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, projectId])
+  @@map("offline_project_syncs")
+}
+
+/// Construction project tracked in the Command Center.
+/// Linked to Unifier via `unifierPid`. Name, site, PM, number, dates, and lifecycle status
+/// are read from PDS at request time (see `lib/project-unifier-merge.ts`); not stored here.
+model Project {
+  id                 String    @id @default(cuid())
+  installManagerId   String?
+  installManagerName String?
+  projectManagerId   String?
+  /// Unifier shell PID — source key for live metadata from `UNIFIER_US_XPRJ`.
+  unifierPid         String?   @unique
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  /// Soft delete timestamp. Null means the project is active.
+  deletedAt          DateTime?
+  /// Production sandbox: visible and mutable only to Admin, Developer, and Designer in strict production (see `lib/production-project-access.ts`).
+  isTestProject      Boolean   @default(false)
+  /// When set, this test project was duplicated from another project (legacy clone provenance).
+  clonedFromProjectId String?
+  clonedFromProject   Project?  @relation("ProjectClone", fields: [clonedFromProjectId], references: [id], onDelete: SetNull)
+  clones              Project[] @relation("ProjectClone")
+  /// Original Unifier PID from the source project — used for display merge only on test clones.
+  sourceUnifierPid    String?
+  clonedAt            DateTime?
+  projectRows           ProjectRow[]
+  subScopes             ProjectSubScope[]
+  issues                ProjectIssue[]
+  observations          ProjectObservation[]
+  activityLogs          ActivityLog[]
+  unitAlbumPhotos       MediaAttachment[]       @relation("UnitAlbumPhotos")
+  inspectionSubmissions InspectionSubmission[]  @relation("SubmissionProject")
+  testSeedBatches       TestSeedBatch[]
+  customSiteLocations ProjectCustomSiteLocation[]
+  favoritedBy           UserProjectFavorite[]
+  projectScopeOverrides ProjectScopeOverride[]
+  fieldDailyReportProjects FieldDailyReportProject[]
+  projectNotes           ProjectNote[]
+  siteGeocode            ProjectSiteGeocode?
+  mediaCaptureContexts   MediaCaptureContext[] @relation("CaptureProject")
+  fieldMediaUploadContexts FieldMediaUploadContext[] @relation("UploadCaptureProject")
+
+  @@index([deletedAt])
+  @@index([installManagerId])
+  @@index([isTestProject])
+  @@index([projectManagerId])
+  @@index([unifierPid])
+  @@index([clonedFromProjectId])
+}
+
+/// Placement for a custom site location within the project hierarchy.
+enum CustomSitePlacement {
+  standalone
+  building
+  building_level
+
+  @@map("custom_site_placement")
+}
+
+/// User-defined site areas (parking lot, loading dock, etc.) for field notes only — no install tracking rows.
+model ProjectCustomSiteLocation {
+  id          String              @id @default(cuid())
+  projectId   String              @map("project_id")
+  project     Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  name        String
+  building    String              @default("")
+  level       String              @default("")
+  placement   CustomSitePlacement @default(standalone)
+  sortOrder   Int                 @default(0) @map("sort_order")
+  createdById String              @map("created_by_id")
+  createdBy   User                @relation("CustomSiteLocationCreator", fields: [createdById], references: [id])
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+
+  @@unique([projectId, placement, building, level, name])
+  @@index([projectId])
+  @@map("project_custom_site_locations")
+}
+
+/// Per-user pinned favorites on the Projects list (order = createdAt asc).
+model UserProjectFavorite {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, projectId])
+  @@index([userId])
+  @@map("user_project_favorites")
+}
+
+/// Official CP Build scope definitions — the source of truth for abbreviations and display names.
+model CanonicalScopeType {
+  id                   String                 @id @default(cuid())
+  code                 String                 @unique /// 2–6 char uppercase abbreviation shown in UI (e.g. "CPB", "TILE")
+  displayName          String                 @map("display_name") /// Full display name (e.g. "Carpet Broadloom")
+  sortOrder            Int                    @default(0) @map("sort_order")
+  scopeTypes           ScopeType[]
+  projectScopeOverrides ProjectScopeOverride[]
+
+  @@map("canonical_scope_types")
+}
+
+/// Lookup: scope types for UPM rows (e.g. Framing, Drywall).
+model ScopeType {
+  id                    String                 @id @default(cuid())
+  code                  String                 @unique
+  name                  String
+  canonicalScopeTypeId  String?                @map("canonical_scope_type_id")
+  canonicalScopeType    CanonicalScopeType?    @relation(fields: [canonicalScopeTypeId], references: [id], onDelete: SetNull)
+  projectRows           ProjectRow[]
+  subScopes             ProjectSubScope[]
+  projectScopeOverrides ProjectScopeOverride[]
+
+  @@index([canonicalScopeTypeId])
+  @@map("scope_types")
+}
+
+/// Per-project canonical scope override — lets each project display a scope type with a
+/// different canonical name than the global default without affecting other projects.
+model ProjectScopeOverride {
+  id                   String             @id @default(cuid())
+  projectId            String             @map("project_id")
+  scopeTypeId          String             @map("scope_type_id")
+  canonicalScopeTypeId String             @map("canonical_scope_type_id")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+
+  project              Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  scopeType            ScopeType          @relation(fields: [scopeTypeId], references: [id], onDelete: Cascade)
+  canonicalScopeType   CanonicalScopeType @relation(fields: [canonicalScopeTypeId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, scopeTypeId])
+  @@index([projectId])
+  @@map("project_scope_overrides")
+}
+
+/// Lookup: location types for UPM rows.
+model LocationType {
+  id         String      @id @default(cuid())
+  code       String      @unique
+  name       String
+  projectRows ProjectRow[]
+
+  @@map("location_types")
+}
+
+/// Lookup: cost types for UPM rows.
+model CostType {
+  id         String      @id @default(cuid())
+  code       String      @unique
+  name       String
+  projectRows ProjectRow[]
+
+  @@map("cost_types")
+}
+
+/// Lookup: install teams (installers) for UPM rows.
+model InstallTeam {
+  id         String      @id @default(cuid())
+  code       String      @unique
+  name       String
+  projectRows ProjectRow[]
+
+  @@map("install_teams")
+}
+
+/// Lookup: unit of measure types (e.g. EA, SF, LF).
+model UomType {
+  id         String      @id @default(cuid())
+  code       String      @unique
+  name       String
+  projectRows ProjectRow[]
+
+  @@map("uom_types")
+}
+
+/// Sub-scope definition: splits a ScopeType within a unitType across a project.
+/// Created by Install Managers when a scope needs separate tracking areas
+/// (e.g. "Kitchen Cabinetry" + "Bathroom Cabinetry" within the "Cabinetry" scope).
+/// Applies to every ProjectRow that matches (projectId + unitType + scopeTypeId).
+model ProjectSubScope {
+  id           String    @id @default(cuid())
+  projectId    String
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  scopeTypeId  String
+  scopeType    ScopeType @relation(fields: [scopeTypeId], references: [id], onDelete: Restrict)
+  unitType     String    /// Matches ProjectRow.unitType — sub-scope applies to all rows of this unit type
+  name         String    /// Display label, e.g. "Kitchen Cabinetry"
+  displayOrder Int       @default(0) /// Controls ordering within a scope group
+  qty          Decimal?  @db.Decimal(18, 4) /// Manual-mode qty: if set, each instance gets this exact amount; if null, even split applies
+  createdById  String
+  createdBy    User      @relation("SubScopeCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  instances    ProjectSubScopeInstance[]
+
+  @@unique([projectId, scopeTypeId, unitType, name])
+  @@index([projectId])
+  @@index([projectId, scopeTypeId, unitType])
+  @@map("project_sub_scopes")
+}
+
+/// Per-row tracking instance for a sub-scope.
+/// One row per (ProjectSubScope × ProjectRow) for every row that matches the sub-scope's
+/// (projectId, unitType, scopeTypeId). Tracks stage/status/inspection independently.
+/// When instances exist for a row, direct scopeStage/scopeStatus updates on the parent
+/// ProjectRow are blocked (409) — install managers update instances instead.
+model ProjectSubScopeInstance {
+  id               String            @id @default(cuid())
+  subScopeId       String
+  subScope         ProjectSubScope   @relation(fields: [subScopeId], references: [id], onDelete: Cascade)
+  rowId            String
+  row              ProjectRow        @relation(fields: [rowId], references: [id], onDelete: Cascade)
+
+  scopeStage       ScopeStage?
+  scopeStatus      ScopeStatus?
+  inspectionStatus InspectionStatus?
+  qty              Decimal?          @db.Decimal(18, 4) /// Resolved quantity for this unit's sub-scope slice
+
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  subScopeTags IssueSubScopeTag[]
+  observations ProjectObservation[]
+
+  @@unique([subScopeId, rowId])
+  @@index([rowId])
+  @@index([subScopeId])
+  @@map("project_sub_scope_instances")
+}
+
+/// Rows from Excel or pasted spreadsheet uploads when creating a project.
+/// Column order matches the Field Tracker UPM spreadsheet.
+model ProjectRow {
+  id                String       @id @default(cuid())
+  projectId         String
+  project           Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  rowIndex          Int          /// Preserves original spreadsheet row order
+
+  building          String       @default("")
+  level             String       @default("")
+  unit              String       @default("")
+  area              String       @default("")
+  shipPhase         String       @default("")
+  buildPhase        String       @default("")
+  scheme            String       @default("")
+  unitType          String       @default("")
+  description       String       @default("")
+
+  scopeTypeId       String?
+  scopeType         ScopeType?   @relation(fields: [scopeTypeId], references: [id], onDelete: SetNull)
+
+  csiPrimeCode      String       @default("")   /// 2-digit CSI code
+  csiDetailCode     String       @default("")   /// 6-digit CSI code
+
+  locationTypeId    String?
+  locationType      LocationType? @relation(fields: [locationTypeId], references: [id], onDelete: SetNull)
+
+  costTypeId        String?
+  costType          CostType?    @relation(fields: [costTypeId], references: [id], onDelete: SetNull)
+
+  installerId       String?
+  installer         InstallTeam? @relation(fields: [installerId], references: [id], onDelete: SetNull)
+
+  /// Unifier subcontractor assigned to this scope — stores UNIFIER_UXSUB.ID.
+  /// Display name is resolved at render time from the live Unifier sub list.
+  unifierSubId      String?
+
+  qty               Decimal?    @db.Decimal(18, 4)
+  uomId             String?
+  uom               UomType?     @relation(fields: [uomId], references: [id], onDelete: SetNull)
+
+  unitRate          Decimal?     @db.Decimal(18, 4)
+  budgetedManHours   Decimal?    @db.Decimal(18, 4)
+  startDate         DateTime?
+  finishDate        DateTime?
+  percentComplete   Decimal?    @db.Decimal(5, 2)
+  actualManHours    Decimal?    @db.Decimal(18, 4)
+
+  scopeStage        ScopeStage?
+  scopeStatus       ScopeStatus?
+
+  /// QC inspection clearance state. Available when scopeStage=INSTALL and scopeStatus=COMPLETE.
+  /// READY = cleared for inspection, PASSED = inspection done, FAILED = failed.
+  inspectionStatus  InspectionStatus?
+
+  /// Sub-scope tracking instances. When non-empty, direct updates to scopeStage/scopeStatus
+  /// on this row are blocked (409) — update each instance instead.
+  subScopeInstances    ProjectSubScopeInstance[]
+  issueScopeTags       IssueScopeTag[]
+  observationScopeTags ObservationScopeTag[]
+  clearInspections     ClearInspection[]
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@map("project_rows")
+  @@index([projectId])
+  @@index([projectId, building, level, unit])
+}
+
+/// Single-row table keyed to "current". Stores the active design token
+/// overrides for the app. Only ADMIN, TEAM_LEAD, and DESIGNER roles may write.
+model DesignTokenSnapshot {
+  id          String    @id @default("current")
+  overrides   Json      @default("{}")
+  savedById   String?
+  savedByName String?
+  savedAt     DateTime  @updatedAt
+}
+
+/// Layout issue reported via DevTools → Spacing → Issues.
+/// Tracks UI layout problems, their fix details, and resolution status.
+/// Screenshots are stored as base64 @db.Text — acceptable for dev tooling;
+/// migrate to object storage (e.g. R2/S3) if volume grows.
+model LayoutIssue {
+  id          String            @id @default(cuid())
+  description String
+  device      String
+  platform    String
+  route       String
+  status      LayoutIssueStatus @default(OPEN)
+
+  /// Base64 data URL screenshot — nullable, can be large
+  screenshot  String?           @db.Text
+
+  /// Set when status transitions to FIXED
+  fixNote     String?
+  fixedAt     DateTime?
+
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@map("layout_issues")
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum ScopeStage {
+  STAGING
+  ASSEMBLY
+  INSTALL
+}
+
+enum ScopeStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  BLOCKED
+  PENDING_VERIFICATION
+  COMPLETE
+}
+
+enum LayoutIssueStatus {
+  OPEN
+  FIXED
+}
+
+/// Inspection clearance status for a scope row, set by a QC reviewer after the
+/// scope reaches INSTALL+COMPLETE. Null means not yet reviewed.
+enum InspectionStatus {
+  READY
+  PASSED
+  FAILED
+}
+
+/// Pass/Fail result for an in-app clear inspection logged against a scope row.
+/// Each status change creates a new record to build a history log.
+enum ClearInspectionStatus {
+  PASSED
+  FAILED
+}
+
+/// Lookup: clear inspection vs calibration (BI joins via clear_inspections.inspection_type_id).
+model InspectionType {
+  id               String            @id @default(cuid())
+  code             String            @unique
+  name             String
+  clearInspections ClearInspection[]
+
+  @@map("inspection_types")
+}
+
+/// Pass/fail inspection event on a scope row (clear, calibration, …).
+/// Vision: rename table to `inspections` and track all form-based inspection types here;
+/// `inspection_submissions` holds answers. Not renamed yet — calibrations now write here too.
+model ClearInspection {
+  id                     String                  @id @default(cuid())
+  rowId                  String
+  row                    ProjectRow              @relation(fields: [rowId], references: [id], onDelete: Cascade)
+  status                 ClearInspectionStatus
+  /// FK to inspection_types — authoritative for BI; do not infer from submission JSON.
+  inspectionTypeId       String                  @map("inspection_type_id")
+  inspectionType         InspectionType          @relation(fields: [inspectionTypeId], references: [id])
+  /// Who performed the inspection (session user at submit time).
+  inspectedById          String?                 @map("inspected_by_id")
+  inspectedBy            User?                   @relation("ClearInspectionInspector", fields: [inspectedById], references: [id], onDelete: SetNull)
+  /// Set when this history row was created from a completed form submission.
+  inspectionSubmissionId String?                 @unique
+  inspectionSubmission   InspectionSubmission?   @relation(fields: [inspectionSubmissionId], references: [id], onDelete: SetNull)
+  /// When this row is a calibration, the original clear inspection being reviewed.
+  calibratedAgainstClearInspectionId String?       @map("calibrated_against_clear_inspection_id")
+  calibratedAgainstClearInspection   ClearInspection?  @relation("CalibrationTarget", fields: [calibratedAgainstClearInspectionId], references: [id], onDelete: SetNull)
+  calibrationsOfThisInspection       ClearInspection[] @relation("CalibrationTarget")
+  deletedAt              DateTime?
+  testSeedBatchId        String?
+  testSeedBatch          TestSeedBatch?          @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+
+  @@index([rowId])
+  @@index([inspectionTypeId])
+  @@index([inspectedById])
+  @@index([testSeedBatchId])
+  @@index([calibratedAgainstClearInspectionId])
+  @@map("clear_inspections")
+}
+
+/// User-submitted feedback — bugs or feature requests.
+/// Available to all authenticated users. Admins can view and triage.
+/// Screenshots stored as base64 @db.Text — fine for infrequent submissions;
+/// consider object storage (R2/S3) if volume grows.
+/// Marker.io submissions arrive via webhook and are stored with source=MARKER_IO.
+model FeedbackReport {
+  id          String         @id @default(cuid())
+  userId      String
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  assigneeId  String?
+  assignee    User?          @relation("FeedbackAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  /// Human-readable sequential reference ID — displayed as FB-0042
+  shortId     Int            @default(autoincrement()) @unique
+
+  type        FeedbackType
+  title       String
+  description String         @db.Text
+
+  /// Base64 data URL screenshot or file path — nullable. Legacy field; new submissions use screenshots[].
+  screenshot  String?        @db.Text
+
+  /// Supabase Storage signed URLs for screenshots attached at submission time (up to 10).
+  /// New submissions populate this array instead of the legacy screenshot field.
+  screenshots String[]       @default([])
+
+  /// Marker.io recording URL (or future self-hosted video URL)
+  videoUrl    String?
+
+  /// The page URL where the feedback was submitted (auto-captured)
+  pageUrl     String?
+
+  status      FeedbackStatus @default(OPEN)
+
+  /// Triage-only; null = unset
+  priority    FeedbackPriority?
+
+  /// Submission channel — IN_APP (direct API) or MARKER_IO (via webhook)
+  source      FeedbackSource @default(IN_APP)
+
+  /// Admin-only note (triage, resolution info)
+  adminNote   String?        @db.Text
+
+  /// True when the submitter used the Gemini-assisted flow to draft this report.
+  aiAssisted  Boolean        @default(false)
+
+  /// Structured metadata captured during the AI-assisted conversation, persisted
+  /// verbatim for auditability. Shape is documented in lib/feedback-assist-schema.ts
+  /// (FeedbackAssistMetadata). Nullable — always null for non-AI submissions.
+  aiAssistMetadata Json?
+  /// Timestamp of the most recent successful send to Rad-Dash; null = never sent
+  sentToRadDashAt DateTime?
+
+  /// Rad-Dash ticket ID returned when this report was forwarded via webhook; null = not yet sent
+  radDashTicketId String? @unique
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  notifications       Notification[]
+  tour                FeedbackTour?
+  comments            FeedbackComment[]
+  mentions            FeedbackMention[]
+  /// Reports that are marked as duplicates of this one (this is the canonical/primary)
+  canonicalDuplicates FeedbackDuplicate[] @relation("CanonicalDuplicates")
+  /// If set, this report is a duplicate of another (it is hidden from the main inbox list)
+  duplicateOf         FeedbackDuplicate?  @relation("DuplicateOf")
+
+  @@map("feedback_reports")
+  @@index([userId])
+  @@index([assigneeId])
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt])
+  @@index([source])
+  @@index([aiAssisted])
+}
+
+enum FeedbackType {
+  BUG
+  FEATURE_REQUEST
+}
+
+enum FeedbackStatus {
+  OPEN
+  IN_PROGRESS
+  WAITING_FOR_RESPONSE
+  NEEDS_INVESTIGATION
+  WONT_FIX
+  RESOLVED
+  DELETED
+}
+
+enum FeedbackSource {
+  IN_APP
+  MARKER_IO
+}
+
+enum FeedbackPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+/// Threaded comment on a feedback report. Same soft-delete / edit patterns as issue comments.
+model FeedbackComment {
+  id               String         @id @default(cuid())
+  feedbackReportId String
+  feedbackReport   FeedbackReport @relation(fields: [feedbackReportId], references: [id], onDelete: Cascade)
+  authorId         String
+  author           User           @relation("FeedbackCommentAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  body             String         @db.Text
+  editedAt         DateTime?
+  deletedAt        DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  attachments        MediaAttachment[]
+  mentionsAsSource   FeedbackMention[] @relation("FeedbackMentionSourceComment")
+
+  @@index([feedbackReportId])
+  @@map("feedback_comments")
+}
+
+/// Users @mentioned in feedback comments — grants inbox list visibility without being the submitter.
+model FeedbackMention {
+  id               String          @id @default(cuid())
+  feedbackReportId String
+  feedbackReport   FeedbackReport  @relation(fields: [feedbackReportId], references: [id], onDelete: Cascade)
+  mentionedUserId  String
+  mentionedUser    User            @relation("FeedbackMentionUser", fields: [mentionedUserId], references: [id], onDelete: Cascade)
+  sourceCommentId  String?
+  sourceComment    FeedbackComment? @relation("FeedbackMentionSourceComment", fields: [sourceCommentId], references: [id], onDelete: SetNull)
+  createdAt        DateTime        @default(now())
+
+  @@unique([feedbackReportId, mentionedUserId])
+  @@index([mentionedUserId])
+  @@map("feedback_mentions")
+}
+
+/// Links two feedback reports as duplicates.
+/// The "canonical" is the primary (stays visible in the inbox).
+/// The "duplicate" is hidden from the main list; its submission is viewable via the canonical's Duplicates tab.
+/// Each report can belong to at most one canonical (duplicateId is @unique).
+model FeedbackDuplicate {
+  id          String         @id @default(cuid())
+  canonicalId String
+  canonical   FeedbackReport @relation("CanonicalDuplicates", fields: [canonicalId], references: [id], onDelete: Cascade)
+  duplicateId String         @unique
+  duplicate   FeedbackReport @relation("DuplicateOf", fields: [duplicateId], references: [id], onDelete: Cascade)
+  createdAt   DateTime       @default(now())
+
+  @@map("feedback_duplicates")
+  @@index([canonicalId])
+}
+
+/// In-app notification. Covers:
+///   1. Feedback — feedbackId set; type FEEDBACK_* (status, assignment). FEEDBACK_ASSIGNED sets actorId/actorName (assigner).
+///   2. @mention — actorId/Name, projectId, and one of issueId / observationId / mentionCommentId; type MENTIONED_*.
+model Notification {
+  id         String           @id @default(cuid())
+  userId     String
+  user       User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Feedback notifications (feedbackId required for FEEDBACK_* types)
+  feedbackId String?
+  feedback   FeedbackReport?  @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+
+  // Mention notification fields (set for MENTIONED_* types)
+  actorId          String?
+  actorName        String?
+  projectId        String?
+  issueId          String?
+  observationId    String?
+  mentionCommentId String?
+
+  type       NotificationType
+  read       Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+
+  @@map("notifications")
+  @@index([userId])
+  @@index([userId, read])
+  @@index([feedbackId])
+}
+
+enum NotificationType {
+  FEEDBACK_IN_PROGRESS
+  FEEDBACK_RESOLVED
+  FEEDBACK_ASSIGNED
+  FEEDBACK_DUPLICATE_RESOLVED
+  MENTIONED_IN_COMMENT
+  MENTIONED_IN_ISSUE_NOTES
+}
+
+/// Admin-authored guided tour attached to a resolved FeedbackReport.
+/// Steps are a JSON array of TourStep objects that drive the TourPlayer UI.
+/// The presence of this record signals the notification card should show a "Watch tour" button.
+model FeedbackTour {
+  id         String         @id @default(cuid())
+  feedbackId String         @unique
+  feedback   FeedbackReport @relation(fields: [feedbackId], references: [id], onDelete: Cascade)
+
+  /// JSON array of TourStep: { order, pageUrl, elementSelector, title, description, voiceText }
+  steps      Json           @default("[]")
+
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@map("feedback_tours")
+}
+
+/// A deployed release entry — populated from CHANGELOG.md or manually via the DevTools admin UI.
+/// Used by the Release Checklist tab to show what's new since an admin's last visit to the environment.
+model Release {
+  id          String   @id @default(cuid())
+  title       String
+  prNumber    Int?
+  branch      String?
+  /// Which environment this release targets: "development" | "staging" | "production" | "all"
+  environment String   @default("all")
+  mergedAt    DateTime
+  /// JSON array of ReleaseChange: { id: string, description: string, route?: string, category?: string }
+  changes             Json     @default("[]")
+  /// JSON array of VerificationStep: { id, changeId, title, instructions, route, category }
+  /// Populated by POST /api/automation/release-verification (Gemini-generated QA checklist).
+  verificationSteps   Json     @default("[]")
+  createdAt           DateTime @default(now())
+
+  verifications ReleaseVerification[]
+  tour          ReleaseTour?
+
+  @@map("releases")
+  @@index([mergedAt])
+  @@index([environment])
+}
+
+/// Admin-authored guided tour attached to a Release.
+/// When present, the ReleaseTourBanner shows a "See what's new" CTA to all users
+/// on first load after a new deploy.
+model ReleaseTour {
+  id        String            @id @default(cuid())
+  releaseId String            @unique
+  release   Release           @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  steps     ReleaseTourStep[]
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@map("release_tours")
+}
+
+/// Individual step in a ReleaseTour — mirrors TourStep interface in TourPlayer.
+model ReleaseTourStep {
+  id              String      @id @default(cuid())
+  tourId          String
+  tour            ReleaseTour @relation(fields: [tourId], references: [id], onDelete: Cascade)
+  order           Int
+  pageUrl         String
+  elementSelector String
+  title           String
+  description     String
+  voiceText       String
+
+  @@map("release_tour_steps")
+  @@index([tourId])
+}
+
+/// Records that a specific admin has verified a release in a given environment.
+model ReleaseVerification {
+  id          String   @id @default(cuid())
+  releaseId   String
+  release     Release  @relation(fields: [releaseId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  environment String
+  verifiedAt  DateTime @default(now())
+  notes       String?
+
+  @@unique([releaseId, userId, environment])
+  @@map("release_verifications")
+  @@index([userId, environment])
+}
+
+/// Phil's daily morning briefing — one row per calendar day (the day being summarized).
+/// Generated by Gemini AI from GitHub activity + DB stats. Persists for the day so
+/// refreshing the Morning Briefing page doesn't re-invoke the AI pipeline.
+model DailyBriefing {
+  id          String   @id @default(cuid())
+  /// The date this briefing covers (yesterday's date, stored as midnight UTC).
+  dateFor     DateTime @db.Date
+  generatedAt DateTime @default(now())
+  /// ID of the SUPER_ADMIN who triggered generation.
+  generatedBy String
+  /// Full DailyBriefingReport as a JSON blob.
+  report      Json
+
+  @@unique([dateFor])
+  @@map("daily_briefings")
+  @@index([dateFor])
+}
+
+/// How a field daily report snapshot was created.
+enum FieldDailyReportTrigger {
+  MANUAL
+  SCHEDULED
+
+  @@map("field_daily_report_trigger")
+}
+
+/// Per-IM, per-calendar-day auto-generated field log from activity_logs.
+model FieldDailyReport {
+  id                   String                  @id @default(cuid())
+  installManagerUserId String
+  installManager       User                    @relation("FieldDailyReportInstallManager", fields: [installManagerUserId], references: [id], onDelete: Cascade)
+  reportDate           DateTime                @db.Date
+  generatedAt          DateTime                @default(now())
+  generatedByUserId    String?
+  trigger              FieldDailyReportTrigger @default(MANUAL)
+  /// Upper bound of activity included in the snapshot (manual = now; scheduled = end of day).
+  activityThrough      DateTime
+  projects             FieldDailyReportProject[]
+
+  @@unique([installManagerUserId, reportDate])
+  @@index([installManagerUserId, reportDate(sort: Desc)])
+  @@map("field_daily_reports")
+}
+
+/// One project's frozen snapshot within a field daily report.
+model FieldDailyReportProject {
+  id                 String   @id @default(cuid())
+  fieldDailyReportId String
+  fieldDailyReport   FieldDailyReport @relation(fields: [fieldDailyReportId], references: [id], onDelete: Cascade)
+  projectId          String
+  project            Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  snapshot           Json
+  /// IM-entered headcount for the day (nullable until filled).
+  dailyManpower            Int?
+  dailyManpowerSetAt       DateTime?
+  dailyManpowerSetByUserId String?
+  dailyManpowerSetBy       User?    @relation("FieldDailyReportDailyManpowerSetBy", fields: [dailyManpowerSetByUserId], references: [id], onDelete: SetNull)
+  sectionNotes             FieldDailyReportSectionNote[]
+
+  @@unique([fieldDailyReportId, projectId])
+  @@index([projectId])
+  @@index([dailyManpowerSetByUserId])
+  @@map("field_daily_report_projects")
+}
+
+/// IM/user note on a report section (many per section; replaces legacy single overlay comment).
+model FieldDailyReportSectionNote {
+  id                        String                  @id @default(cuid())
+  fieldDailyReportProjectId String
+  fieldDailyReportProject   FieldDailyReportProject @relation(fields: [fieldDailyReportProjectId], references: [id], onDelete: Cascade)
+  sectionKey                String
+  /// Empty string = section-level; otherwise stable item key from snapshot.
+  itemKey                   String                  @default("")
+  body                      String                  @default("")
+  authorUserId              String
+  author                    User                    @relation("FieldDailyReportSectionNoteAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+  editedAt                  DateTime?
+  deletedAt                 DateTime?
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+  replies                   FieldDailyReportSectionNoteReply[]
+
+  @@index([fieldDailyReportProjectId, sectionKey, itemKey, createdAt(sort: Desc)])
+  @@map("field_daily_report_section_notes")
+}
+
+/// Reply on a field daily section note.
+model FieldDailyReportSectionNoteReply {
+  id           String                      @id @default(cuid())
+  noteId       String
+  note         FieldDailyReportSectionNote   @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  body         String                      @default("")
+  authorUserId String
+  author       User                        @relation("FieldDailyReportSectionNoteReplyAuthor", fields: [authorUserId], references: [id], onDelete: Restrict)
+  editedAt     DateTime?
+  deletedAt    DateTime?
+  createdAt    DateTime                    @default(now())
+  updatedAt    DateTime                    @updatedAt
+
+  @@index([noteId, createdAt(sort: Desc)])
+  @@map("field_daily_report_section_note_replies")
+}
+
+/// Tracks when an admin last visited each environment.
+/// "Last visit" is used to compute which releases are new since the admin was last here.
+model EnvironmentVisit {
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  environment   String
+  lastVisitedAt DateTime @default(now())
+
+  @@id([userId, environment])
+  @@map("environment_visits")
+}
+
+/// Personal backlog items for the Morning Briefing — tasks Phil wants to track.
+model BacklogItem {
+  id        String            @id @default(cuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  notes     String?
+  source    BacklogItemSource @default(MANUAL)
+  status    BacklogItemStatus @default(ACTIVE)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@index([userId, status])
+  @@map("backlog_items")
+}
+
+enum BacklogItemSource {
+  MANUAL
+  AI_SUGGESTED
+}
+
+enum BacklogItemStatus {
+  ACTIVE
+  DISMISSED
+}
+
+/// Cached AI synthesis reports generated from a window of daily briefings.
+/// One row per (windowDays, generation run) — latest is served by default.
+model BriefingSynthesis {
+  id          String   @id @default(cuid())
+  /// null = all-time window; 30 or 90 for rolling windows.
+  windowDays  Int?
+  generatedAt DateTime @default(now())
+  generatedBy String
+  /// Full BriefingSynthesisReport JSON blob.
+  report      Json
+
+  @@map("briefing_syntheses")
+  @@index([windowDays, generatedAt])
+}
+
+/// Card-level feedback on individual briefing sections.
+/// Stores both the raw signal and any AI-generated justification or revision.
+model BriefingFeedback {
+  id              String   @id @default(cuid())
+  briefingId      String
+  /// Which section: "ROI_ITEM" | "OPTIMIZATION" | "ISSUE" | "SPRINT_ITEM" | "SHIPPED_ITEM" | "INSIGHT"
+  section         String
+  /// Stable key identifying which item within the section (e.g. index or title slug).
+  itemKey         String
+  /// "JUSTIFY" | "CHALLENGE" | "APPROVE"
+  feedbackType    String
+  /// "WRONG_CONTEXT" | "INFLATED_NUMBER" | "NOT_APPLICABLE" | "OTHER" — set when feedbackType = CHALLENGE
+  challengeReason String?
+  userNote        String?
+  /// Gemini's plain-text justification for the item (populated by /feedback/justify).
+  aiJustification String?
+  /// Gemini's revised card JSON (populated by /feedback/revise).
+  aiRevision      Json?
+  createdAt       DateTime @default(now())
+  userId          String
+
+  @@map("briefing_feedbacks")
+  @@index([briefingId, section])
+  @@index([userId, createdAt])
+}
+
+/// Growing ruleset injected into every daily briefing generation prompt.
+/// Phil manages these in the Analysis tab UI.
+model BriefingRule {
+  id        String   @id @default(cuid())
+  text      String
+  /// "MANUAL" = Phil added it directly; "FEEDBACK_DERIVED" = auto-suggested from challenge patterns.
+  source    String   @default("MANUAL")
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  createdBy String
+  updatedAt DateTime @updatedAt
+
+  @@map("briefing_rules")
+  @@index([active, createdAt])
+}
+
+/// Audit trail for SUPER_ADMIN masquerade sessions.
+/// Records who impersonated whom and for how long.
+/// endedAt is null while the session is active.
+model MasqueradeLog {
+  id           String    @id @default(cuid())
+  actorId      String
+  targetUserId String
+  startedAt    DateTime  @default(now())
+  endedAt      DateTime?
+
+  actor  User @relation("MasqueradeActor",  fields: [actorId],      references: [id], onDelete: Cascade)
+  target User @relation("MasqueradeTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  @@index([actorId])
+  @@index([targetUserId])
+  @@index([startedAt])
+  @@map("masquerade_logs")
+}
+
+// ─── Issues & Observations ────────────────────────────────────────────────────
+
+/// Lookup: issue types for field issue reports (Install Director managed).
+model IssueTypeCatalog {
+  id             String   @id @default(cuid())
+  code           String   @unique
+  displayName    String   @map("display_name")
+  sortOrder      Int      @default(0) @map("sort_order")
+  isActive       Boolean  @default(true) @map("is_active")
+  requiresVisual Boolean  @default(false) @map("requires_visual")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@map("issue_type_catalog")
+}
+
+/// Lookup: responsible parties for field issue reports (Install Director managed).
+model ResponsiblePartyCatalog {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  displayName String   @map("display_name")
+  sortOrder   Int      @default(0) @map("sort_order")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("responsible_party_catalog")
+}
+
+/// Lookup: observation types for field observation reports (Project Settings managed).
+model ObservationTypeCatalog {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  displayName String   @map("display_name")
+  sortOrder   Int      @default(0) @map("sort_order")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("observation_type_catalog")
+}
+
+enum IssueStatus {
+  OPEN
+  RESOLVED
+
+  @@map("issue_status")
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+
+  @@map("user_status")
+}
+
+enum TranscriptStatus {
+  NONE
+  PENDING
+  PROCESSING
+  COMPLETE
+  FAILED
+
+  @@map("transcript_status")
+}
+
+enum CaptureGpsStatus {
+  GRANTED
+  DENIED
+  TIMEOUT
+  UNAVAILABLE
+
+  @@map("capture_gps_status")
+}
+
+enum CaptureAppShell {
+  BROWSER_TAB
+  PWA_INSTALLED
+
+  @@map("capture_app_shell")
+}
+
+enum CaptureMethod {
+  NATIVE_CAMERA
+  WEBCAM
+  PHOTO_LIBRARY
+  FILE_DROP
+
+  @@map("capture_method")
+}
+
+enum ProjectGeocodeStatus {
+  SUCCESS
+  FAILED
+  PENDING
+
+  @@map("project_geocode_status")
+}
+
+/// A site issue logged against a unit (and optionally specific scope rows).
+/// TRADE_DAMAGE_REPAIR and DAMAGED_MATERIALS require at least one image/* or video/* attachment.
+/// unitRef = "${building}|${level}|${unit}" — used to query all issues for a given unit.
+model ProjectIssue {
+  id                 String           @id @default(cuid())
+  projectId          String
+  project            Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  unitRef            String?
+
+  shortDescription   String
+  notes              String?
+  issueTypeCode      String           @map("issue_type_code")
+  responsiblePartyCode String         @map("responsible_party_code")
+  isBlockingWork     Boolean          @default(false)
+  status             IssueStatus      @default(OPEN)
+  resolvedAt         DateTime?
+  resolvedById       String?
+  resolvedBy         User?            @relation("IssueResolver", fields: [resolvedById], references: [id])
+  resolutionNote     String?
+
+  /// Set when this issue was created as part of a bulk-report action. All issues in the same bulk action share this ID.
+  bulkGroupId        String?          @map("bulk_group_id")
+  /// Admin test-data seed batch — enables batch cleanup on test projects.
+  testSeedBatchId    String?
+  testSeedBatch      TestSeedBatch?   @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+
+  createdById        String
+  createdBy          User             @relation("IssueCreator", fields: [createdById], references: [id])
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  /// Durable scope keys (building|level|unit|description, normalized). Survives row replacement.
+  scopeRefKeys       String[]         @default([]) @map("scope_ref_keys")
+
+  /// Optional location-builder tags when unitRef is project-level (build phase / area from UPM rows).
+  buildPhaseTag      String?          @map("build_phase_tag")
+  areaTag            String?          @map("area_tag")
+
+  /// Required when issueType = MISSING_MATERIALS — what material is missing.
+  missingMaterialDescription String?  @map("missing_material_description")
+  /// Required when issueType = MISSING_MATERIALS — how much is missing (UOM from tagged scope).
+  missingMaterialQuantity    Decimal? @db.Decimal(18, 4) @map("missing_material_quantity")
+  /// UOM code snapshot from the tagged scope row at create time (e.g. SF, EA).
+  missingMaterialUomCode     String?  @map("missing_material_uom_code")
+
+  attachments        MediaAttachment[]
+  comments           IssueComment[]
+  scopeTags          IssueScopeTag[]
+  subScopeTags       IssueSubScopeTag[]
+  responsiblePartyTags IssueResponsiblePartyTag[]
+
+  @@index([projectId])
+  @@index([unitRef])
+  @@index([issueTypeCode])
+  @@index([responsiblePartyCode])
+  @@index([bulkGroupId])
+  @@index([testSeedBatchId])
+  @@map("project_issues")
+}
+
+/// Join table: one issue ↔ many scope rows
+model IssueScopeTag {
+  id           String       @id @default(cuid())
+  issueId      String
+  issue        ProjectIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  projectRowId String
+  row          ProjectRow   @relation(fields: [projectRowId], references: [id], onDelete: Cascade)
+
+  @@unique([issueId, projectRowId])
+  @@index([issueId])
+  @@index([projectRowId])
+  @@map("issue_scope_tags")
+}
+
+/// Join table: one issue ↔ many sub-scope instances (informational tags only — issue is still at unit level)
+model IssueSubScopeTag {
+  id                 String                  @id @default(cuid())
+  issueId            String
+  issue              ProjectIssue            @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  subScopeInstanceId String
+  subScopeInstance   ProjectSubScopeInstance @relation(fields: [subScopeInstanceId], references: [id], onDelete: Cascade)
+
+  @@unique([issueId, subScopeInstanceId])
+  @@index([issueId])
+  @@index([subScopeInstanceId])
+  @@map("issue_sub_scope_tags")
+}
+
+/// Join table: one issue ↔ many responsible parties
+model IssueResponsiblePartyTag {
+  id        String       @id @default(cuid())
+  issueId   String       @map("issue_id")
+  issue     ProjectIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  partyCode String       @map("party_code")
+
+  @@unique([issueId, partyCode])
+  @@index([issueId])
+  @@index([partyCode])
+  @@map("issue_responsible_party_tags")
+}
+
+/// Comment on an issue. Admins may soft-delete (deletedAt stamped); deleted comments are filtered at the API layer.
+model IssueComment {
+  id          String       @id @default(cuid())
+  issueId     String
+  issue       ProjectIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  authorId    String
+  author      User         @relation("IssueCommentAuthor", fields: [authorId], references: [id])
+  body        String       @db.Text
+  editedAt    DateTime?
+  deletedAt   DateTime?    /// Soft-delete timestamp — set by admin DELETE; filtered out by GET
+  testSeedBatchId String?
+  testSeedBatch   TestSeedBatch? @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  attachments MediaAttachment[]
+
+  @@index([issueId])
+  @@index([testSeedBatchId])
+  @@map("issue_comments")
+}
+
+/// A field observation logged against a unit (and optionally specific scope rows).
+/// unitRef = "${building}|${level}|${unit}" — used to query all observations for a given unit.
+model ProjectObservation {
+  id                 String             @id @default(cuid())
+  projectId          String
+  project            Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  unitRef            String?
+  subScopeInstanceId String?
+  subScopeInstance   ProjectSubScopeInstance? @relation(fields: [subScopeInstanceId], references: [id], onDelete: SetNull)
+
+  title              String             @default("") @db.Text
+  description        String             @default("") @db.Text
+  observationTypeCode String            @map("observation_type_code")
+
+  /// Set when this observation was created as part of a bulk-report action. All observations in the same bulk action share this ID.
+  bulkGroupId        String?          @map("bulk_group_id")
+  testSeedBatchId    String?
+  testSeedBatch      TestSeedBatch?   @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+
+  authorId           String
+  author             User               @relation("ObservationAuthor", fields: [authorId], references: [id])
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  /// Durable scope keys (building|level|unit|description, normalized). Survives row replacement.
+  scopeRefKeys       String[]         @default([]) @map("scope_ref_keys")
+
+  /// Optional location-builder tags when unitRef is project-level (build phase / area from UPM rows).
+  buildPhaseTag      String?          @map("build_phase_tag")
+  areaTag            String?          @map("area_tag")
+
+  attachments        MediaAttachment[]
+  comments           ObservationComment[]
+  scopeTags          ObservationScopeTag[]
+
+  @@index([projectId])
+  @@index([unitRef])
+  @@index([observationTypeCode])
+  @@index([bulkGroupId])
+  @@index([testSeedBatchId])
+  @@map("project_observations")
+}
+
+/// Join table: one observation ↔ many scope rows
+model ObservationScopeTag {
+  id            String             @id @default(cuid())
+  observationId String
+  observation   ProjectObservation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  projectRowId  String
+  row           ProjectRow         @relation(fields: [projectRowId], references: [id], onDelete: Cascade)
+
+  @@unique([observationId, projectRowId])
+  @@index([observationId])
+  @@index([projectRowId])
+  @@map("observation_scope_tags")
+}
+
+/// Comment on an observation. Admins may soft-delete (deletedAt stamped); deleted comments are filtered at the API layer.
+model ObservationComment {
+  id            String             @id @default(cuid())
+  observationId String
+  observation   ProjectObservation @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  authorId      String
+  author        User               @relation("ObsCommentAuthor", fields: [authorId], references: [id])
+  body          String             @db.Text
+  editedAt      DateTime?
+  deletedAt     DateTime?          /// Soft-delete timestamp — set by admin DELETE; filtered out by GET
+  testSeedBatchId String?
+  testSeedBatch   TestSeedBatch?   @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  attachments   MediaAttachment[]
+
+  @@index([observationId])
+  @@index([testSeedBatchId])
+  @@map("observation_comments")
+}
+
+/// Photo, video, or audio file stored in Supabase Storage bucket "field-media".
+/// Polymorphic: exactly one of the five FK fields is non-null (enforced at API layer).
+/// Audio/video supports user-triggered Gemini transcription via POST /transcribe.
+model MediaAttachment {
+  id                   String           @id @default(cuid())
+  storageKey           String           /// e.g. "field-media/issues/abc123.jpg"
+  storageUrl           String           /// Signed Supabase Storage URL (1-year expiry)
+  mimeType             String           /// "image/jpeg", "video/mp4", "audio/webm", etc.
+  fileSizeBytes        Int?
+  durationSeconds      Float?           /// video and audio only
+  thumbnailUrl         String?          /// video thumbnail (future)
+  caption              String?          @db.Text /// optional per-image description
+
+  /// Transcription fields — populated after user taps "Transcribe"
+  transcriptStatus     TranscriptStatus @default(NONE)
+  transcriptLanguage   String?          /// BCP 47 language declared by user (e.g. "es", "en")
+  transcriptOriginal   String?          @db.Text /// Raw transcription in declared source language
+  transcriptEnglish    String?          @db.Text /// Always populated after COMPLETE; copy of original if source is English
+
+  /// Polymorphic FK — exactly one is non-null (unit album entries use unitPhotoProjectId + unitPhotoUnitRef)
+  issueId              String?
+  issue                ProjectIssue?       @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issueCommentId       String?
+  issueComment         IssueComment?       @relation(fields: [issueCommentId], references: [id], onDelete: Cascade)
+  observationId        String?
+  observation          ProjectObservation? @relation(fields: [observationId], references: [id], onDelete: Cascade)
+  observationCommentId String?
+  observationComment   ObservationComment? @relation(fields: [observationCommentId], references: [id], onDelete: Cascade)
+  feedbackCommentId    String?
+  feedbackComment      FeedbackComment?    @relation(fields: [feedbackCommentId], references: [id], onDelete: Cascade)
+  /// Standalone unit photo album entry — set together, both non-null for album photos
+  unitPhotoProjectId   String?
+  unitPhotoUnitRef     String?             /// composite key "${building}|${level}|${unit}"
+  unitPhotoProject     Project?            @relation("UnitAlbumPhotos", fields: [unitPhotoProjectId], references: [id], onDelete: Cascade)
+  /// Source classification for standalone unit album photos.
+  /// "general" = manually uploaded; "status_update" = captured via status-update prompt.
+  /// NULL on legacy rows — treated as "general" at read time.
+  unitPhotoSourceType  String?
+  /// Human-readable label for status_update photos, e.g. "Framing · Completed".
+  unitPhotoSourceLabel String?             @db.Text
+
+  uploadedById         String
+  uploadedBy           User             @relation("MediaUploader", fields: [uploadedById], references: [id])
+  createdAt            DateTime         @default(now())
+
+  /// Linear version chain for observation images: new row points to the attachment it replaces after markup.
+  supersedesId         String?          @unique
+  supersedes           MediaAttachment? @relation("AttachmentVersionLine", fields: [supersedesId], references: [id], onDelete: SetNull)
+  supersededBy         MediaAttachment? @relation("AttachmentVersionLine")
+
+  /// Set on rows created by saving markup (draw/text on image) on an observation.
+  lastMarkedById       String?
+  lastMarkedBy         User?            @relation("MediaLastMarked", fields: [lastMarkedById], references: [id], onDelete: SetNull)
+  lastMarkedAt         DateTime?
+
+  /// Non-destructive pencil/text overlay (JSON). Base image in storage is unchanged when only this updates.
+  imageAnnotation      Json?
+
+  testSeedBatchId      String?
+  testSeedBatch        TestSeedBatch?      @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+
+  captureContext       MediaCaptureContext?
+
+  @@index([issueId])
+  @@index([observationId])
+  @@index([issueCommentId])
+  @@index([observationCommentId])
+  @@index([feedbackCommentId])
+  @@index([unitPhotoProjectId, unitPhotoUnitRef])
+  @@index([testSeedBatchId])
+  @@map("media_attachments")
+}
+
+/// Geocoded lat/lng cache for a project's Unifier siteLocation (one row per project).
+model ProjectSiteGeocode {
+  projectId        String               @id @map("project_id")
+  project          Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  siteLocationText String               @map("site_location_text")
+  latitude         Float?
+  longitude        Float?
+  geocodedAt       DateTime?            @map("geocoded_at")
+  geocodeStatus    ProjectGeocodeStatus @default(PENDING) @map("geocode_status")
+  updatedAt        DateTime             @updatedAt @map("updated_at")
+
+  @@map("project_site_geocodes")
+}
+
+/// Staging capture metadata between POST /api/upload/field-media and MediaAttachment create.
+model FieldMediaUploadContext {
+  storageKey                  String            @id @map("storage_key")
+  captureProjectId            String?           @map("capture_project_id")
+  captureProject              Project?          @relation("UploadCaptureProject", fields: [captureProjectId], references: [id], onDelete: SetNull)
+  captureRecordedAt           DateTime          @map("capture_recorded_at")
+  gpsStatus                   CaptureGpsStatus  @map("gps_status")
+  latitude                    Float?
+  longitude                   Float?
+  accuracyMeters              Float?            @map("accuracy_meters")
+  distanceFromProjectMeters   Float?            @map("distance_from_project_meters")
+  projectSiteAddressAtCapture String?           @map("project_site_address_at_capture") @db.Text
+  projectGeocodeAvailable     Boolean           @default(false) @map("project_geocode_available")
+  deviceType                  String            @map("device_type")
+  browser                     String
+  appShell                    CaptureAppShell   @map("app_shell")
+  captureMethod               CaptureMethod     @map("capture_method")
+  userAgent                   String            @map("user_agent") @db.Text
+  expiresAt                   DateTime          @map("expires_at")
+  createdAt                   DateTime          @default(now()) @map("created_at")
+
+  @@index([captureProjectId])
+  @@index([expiresAt])
+  @@map("field_media_upload_contexts")
+}
+
+/// Permanent 1:1 capture metadata for a field-media attachment (promoted from upload staging).
+model MediaCaptureContext {
+  id                          String            @id @default(cuid())
+  mediaAttachmentId           String            @unique @map("media_attachment_id")
+  mediaAttachment             MediaAttachment   @relation(fields: [mediaAttachmentId], references: [id], onDelete: Cascade)
+  captureProjectId            String?           @map("capture_project_id")
+  captureProject              Project?          @relation("CaptureProject", fields: [captureProjectId], references: [id], onDelete: SetNull)
+  captureRecordedAt           DateTime          @map("capture_recorded_at")
+  gpsStatus                   CaptureGpsStatus  @map("gps_status")
+  latitude                    Float?
+  longitude                   Float?
+  accuracyMeters              Float?            @map("accuracy_meters")
+  distanceFromProjectMeters   Float?            @map("distance_from_project_meters")
+  projectSiteAddressAtCapture String?           @map("project_site_address_at_capture") @db.Text
+  projectGeocodeAvailable     Boolean           @default(false) @map("project_geocode_available")
+  deviceType                  String            @map("device_type")
+  browser                     String
+  appShell                    CaptureAppShell   @map("app_shell")
+  captureMethod               CaptureMethod     @map("capture_method")
+  userAgent                   String            @map("user_agent") @db.Text
+  createdAt                   DateTime          @default(now()) @map("created_at")
+
+  @@index([captureProjectId])
+  @@index([gpsStatus])
+  @@index([captureRecordedAt])
+  @@index([distanceFromProjectMeters])
+  @@index([captureProjectId, captureRecordedAt])
+  @@map("media_capture_contexts")
+}
+
+// ─── Activity Log ─────────────────────────────────────────────────────────────
+
+/// Event types captured in the project activity feed.
+enum ActivityEventType {
+  SCOPE_STATUS_UPDATED
+  SCOPE_STATUS_BULK_UPDATED
+  SCOPE_STATUS_BULK_UNDONE
+  SCOPE_INSPECTION_BULK_UPDATED
+  SCOPE_INSPECTION_UPDATED
+  ISSUE_CREATED
+  ISSUE_BULK_CREATED
+  ISSUE_UPDATED
+  ISSUE_DELETED
+  ISSUE_RESOLVED
+  ISSUE_REOPENED
+  ISSUE_ANNOTATION_UPDATED
+  CLEAR_INSPECTION_SET
+  CLEAR_INSPECTION_DELETED
+  INSPECTION_BACKFILL_SET
+  INSPECTION_BACKFILL_DELETED
+  INSPECTION_SUBMITTED
+  INSPECTION_SYNC_FAILED
+  /// Offline mutation queue upload failure (observations, issues, scope status, etc.).
+  MUTATION_SYNC_FAILED
+  OBSERVATION_CREATED
+  OBSERVATION_BULK_CREATED
+  OBSERVATION_UPDATED
+  OBSERVATION_IMAGE_VERSION_ADDED
+  OBSERVATION_ANNOTATION_UPDATED
+  UNIT_ROW_CREATED
+  UNIT_ROW_DELETED
+  UNIT_ROWS_BULK_DELETED
+  UNIT_INSTALLER_BULK_UPDATED
+  /// Per-scope Unifier subcontractor assigned, changed, or cleared (Field Tracker picker).
+  SCOPE_SUBCONTRACTOR_UPDATED
+  UPM_ROW_UPDATED
+  SUB_SCOPE_INSTANCE_UPDATED
+  /// Field media POST rate limit exceeded — visible to squad roles in activity API only.
+  FIELD_MEDIA_UPLOAD_RATE_LIMITED
+  /// Admin duplicated a live project as a test sandbox.
+  PROJECT_CLONED_AS_TEST
+  /// Custom site location created (field-notes-only area).
+  CUSTOM_SITE_LOCATION_CREATED
+  /// Custom site location deleted.
+  CUSTOM_SITE_LOCATION_DELETED
+  /// Custom site location name or placement edited.
+  CUSTOM_SITE_LOCATION_UPDATED
+  /// Standalone unit album photo uploaded (general or status-update capture).
+  UNIT_PHOTO_UPLOADED
+  /// Admin seeded synthetic test data batch on a test project.
+  PROJECT_TEST_DATA_SEEDED
+  /// Admin removed a synthetic test data batch from a test project.
+  PROJECT_TEST_DATA_BATCH_REMOVED
+  /// Daily manpower count set or cleared on a field daily report project slice.
+  FIELD_DAILY_DAILY_MANPOWER_SET
+
+  @@map("activity_event_type")
+}
+
+/// Tracks an Admin-initiated batch of synthetic test data on a test project.
+model TestSeedBatch {
+  id          String   @id @default(cuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  createdById String
+  createdBy   User     @relation("TestSeedBatchCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  config      Json
+  counts      Json
+  createdAt   DateTime @default(now())
+
+  issues              ProjectIssue[]
+  issueComments       IssueComment[]
+  observations        ProjectObservation[]
+  observationComments ObservationComment[]
+  clearInspections    ClearInspection[]
+  inspectionSubmissions InspectionSubmission[]
+  mediaAttachments    MediaAttachment[]
+  activityLogs        ActivityLog[]
+  projectNotes        ProjectNote[]
+
+  @@index([projectId])
+  @@map("test_seed_batches")
+}
+
+/// Decision log note on a project overview — author may edit or soft-delete their own notes.
+model ProjectNote {
+  id              String         @id @default(cuid())
+  projectId       String
+  project         Project        @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  authorId        String
+  author          User           @relation("ProjectNoteAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+  body            String         @db.Text
+  editedAt        DateTime?
+  pinnedAt        DateTime?
+  deletedAt       DateTime?
+  testSeedBatchId String?
+  testSeedBatch   TestSeedBatch? @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([projectId, pinnedAt(sort: Desc)])
+  @@index([testSeedBatchId])
+  @@map("project_notes")
+}
+
+/// Append-only audit log of key in-app actions taken within a project.
+/// Each successful write in the 8 instrumented routes appends one row.
+/// metadata is a typed JSON payload whose shape is determined by eventType.
+/// userName is denormalized so the display name is preserved even if the user
+/// is later renamed or deleted.
+/// How GPS coordinates were attached to an activity log row.
+enum ActivityLocationSource {
+  ACTIVITY_CAPTURE
+  MEDIA_DERIVED
+  BACKFILL
+
+  @@map("activity_location_source")
+}
+
+/// Permanent 1:1 field GPS context for an activity log entry.
+model ActivityLocationContext {
+  activityLogId               String                 @id @map("activity_log_id")
+  activityLog                 ActivityLog            @relation(fields: [activityLogId], references: [id], onDelete: Cascade)
+  gpsStatus                   CaptureGpsStatus       @map("gps_status")
+  latitude                    Float?
+  longitude                   Float?
+  accuracyMeters              Float?                 @map("accuracy_meters")
+  distanceFromProjectMeters   Float?                 @map("distance_from_project_meters")
+  locationRecordedAt          DateTime               @map("location_recorded_at")
+  source                      ActivityLocationSource
+  createdAt                   DateTime               @default(now()) @map("created_at")
+
+  @@index([gpsStatus])
+  @@index([source])
+  @@map("activity_location_contexts")
+}
+
+model ActivityLog {
+  id        String            @id @default(cuid())
+  projectId String
+  project   Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  userId    String?
+  userName  String?
+  eventType ActivityEventType
+  metadata  Json              @default("{}")
+  createdAt DateTime          @default(now())
+  testSeedBatchId String?
+  testSeedBatch   TestSeedBatch? @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+  locationContext ActivityLocationContext?
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([projectId, eventType])
+  @@index([projectId, userId])
+  @@index([testSeedBatchId])
+  @@map("activity_logs")
+}
+
+// ─── BI / Reporting API ───────────────────────────────────────────────────────
+
+/// Party type for an API key — controls data-shaping rules and future access tiers.
+enum ApiKeyParty {
+  INTERNAL
+  SUBCONTRACTOR
+  GENERAL_CONTRACTOR
+
+  @@map("api_key_party")
+}
+
+/// Machine-to-machine API keys for the read-only BI/reporting API (/api/bi/v1/*).
+/// The raw key is shown once at creation and never stored — only the SHA-256 hash.
+/// scopes controls which endpoints the key can access.
+/// allowedProjectIds restricts access to specific projects (empty = all projects).
+model ApiKey {
+  id                String       @id @default(cuid())
+  name              String
+  keyHash           String       @unique
+  keyPrefix         String       // first 16 chars of the raw key for display only
+  scopes            String[]     // e.g. ["bi:projects","bi:units","bi:team"]
+  allowedProjectIds String[]     // empty = all projects; non-empty = project-scoped
+  party             ApiKeyParty  @default(INTERNAL)
+  createdById       String
+  createdBy         User         @relation("ApiKeyCreator", fields: [createdById], references: [id])
+  /// The user this key was issued to (shown on their Settings page). Null for fully machine-only keys.
+  assignedToId      String?
+  assignedTo        User?        @relation("ApiKeyAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  lastUsedAt        DateTime?
+  expiresAt         DateTime?
+  revokedAt         DateTime?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@index([createdById])
+  @@index([assignedToId])
+  @@map("api_keys")
+}
+
+/// Cache for on-demand Gemini text translations.
+/// Keyed by (contentType, contentId, targetLang) — never re-translates the same content twice.
+model ContentTranslation {
+  id          String   @id @default(cuid())
+  contentType String   /// "issue_description" | "obs_description" | "issue_comment" | "obs_comment"
+  contentId   String   /// id of the source record
+  sourceLang  String   /// BCP 47 source language declared by user (e.g. "es")
+  targetLang  String   /// BCP 47 target language (e.g. "en")
+  translated  String   @db.Text
+  createdAt   DateTime @default(now())
+
+  @@unique([contentType, contentId, targetLang])
+  @@index([contentId])
+  @@map("content_translations")
+}
+
+// ── Form Builder ──────────────────────────────────────────────────────────────
+
+enum FormStatus {
+  DRAFT
+  PUBLISHED
+
+  @@map("form_status")
+}
+
+enum InspectionOutcome {
+  PASS
+  FAIL
+  COMPLETE
+
+  @@map("inspection_outcome")
+}
+
+enum SubmissionSource {
+  FORM
+  BACKFILL
+
+  @@map("submission_source")
+}
+
+/// A user-created inspection form. Draft sections live in draftSections until published.
+model Form {
+  id             String      @id @default(cuid())
+  name           String
+  description    String?
+  status         FormStatus  @default(DRAFT)
+  /// "scope" | "unit" | "project"
+  level          String
+  /// InspectionCategory value (e.g. "PRE_INSTALL")
+  category       String
+  /// "inspection" | "documentation" — documentation forms skip pass/fail rollup
+  purpose        String      @default("inspection")
+  /// Canonical scope-type codes this form applies to (empty = unit-level / all scopes)
+  scopeTypeCodes String[]
+  /// Live draft content (FormSection[] as JSON). Null until the builder first saves.
+  draftSections  Json?
+  createdById    String?
+  createdBy      User?       @relation("FormCreator", fields: [createdById], references: [id])
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  versions       FormVersion[]
+  submissions    InspectionSubmission[]
+  reportingSections InspectionFormSection[]
+  reportingQuestions InspectionFormQuestion[]
+
+  @@map("forms")
+}
+
+/// An immutable snapshot of a Form's content at the time it was published.
+model FormVersion {
+  id            String    @id @default(cuid())
+  formId        String
+  form          Form      @relation(fields: [formId], references: [id], onDelete: Cascade)
+  versionNumber Int
+  /// FormSection[] as JSON
+  sections      Json
+  publishedAt   DateTime  @default(now())
+  publishedById String?
+  publishedBy   User?     @relation("FormVersionPublisher", fields: [publishedById], references: [id])
+  submissions   InspectionSubmission[]
+  reportingSections InspectionFormVersionSection[]
+  reportingQuestions InspectionFormVersionQuestion[]
+
+  @@unique([formId, versionNumber])
+  @@map("form_versions")
+}
+
+/// A completed inspection submission. Stores answers + a full template snapshot.
+model InspectionSubmission {
+  id               String            @id @default(cuid())
+  /// Null for BACKFILL submissions (no form was used)
+  formId           String?
+  form             Form?             @relation(fields: [formId], references: [id])
+  /// The specific published version this submission was filled against (nullable for legacy/backfill)
+  formVersionId    String?
+  formVersion      FormVersion?      @relation(fields: [formVersionId], references: [id])
+  /// Full FormTemplate JSON captured at submission time. Empty object ({}) for BACKFILL submissions.
+  templateSnapshot Json
+  projectId        String
+  project          Project           @relation("SubmissionProject", fields: [projectId], references: [id])
+  /// ProjectRow id (the unit)
+  unitId           String
+  /// ProjectRow id for the specific scope card (nullable for unit-level forms)
+  scopeRowId       String?
+  /// Canonical scope-type code at time of submission
+  scopeTypeCode    String?
+  submittedAt      DateTime          @default(now())
+  outcome          InspectionOutcome
+  deficiencyCount  Int               @default(0)
+  /// Answer payload keyed by question id. For BACKFILL submissions: { note?: string }.
+  payload          Json
+  /// Whether this submission was filled via a real form or manually backfilled (e.g. from Procore migration)
+  source           SubmissionSource  @default(FORM)
+  testSeedBatchId  String?
+  testSeedBatch    TestSeedBatch?    @relation(fields: [testSeedBatchId], references: [id], onDelete: SetNull)
+  clearInspection  ClearInspection?
+  answers          InspectionAnswer[]
+
+  @@index([formId])
+  @@index([projectId])
+  @@index([unitId])
+  @@index([scopeRowId])
+  @@index([testSeedBatchId])
+  @@map("inspection_submissions")
+}
+
+/// Relational mirror of the current editable form section JSON for BI/reporting.
+model InspectionFormSection {
+  id              String                   @id @default(cuid())
+  formId          String
+  form            Form                     @relation(fields: [formId], references: [id], onDelete: Cascade)
+  sourceSectionId String
+  title           String                   @db.Text
+  description     String?                  @db.Text
+  displayOrder    Int
+  questions       InspectionFormQuestion[]
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+
+  @@unique([formId, sourceSectionId])
+  @@index([formId])
+  @@map("inspection_form_sections")
+}
+
+/// Relational mirror of the current editable form question JSON for BI/reporting.
+model InspectionFormQuestion {
+  id                              String                 @id @default(cuid())
+  formId                          String
+  form                            Form                   @relation(fields: [formId], references: [id], onDelete: Cascade)
+  sectionId                       String
+  section                         InspectionFormSection  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  sourceQuestionId                String
+  sourceSectionId                 String
+  title                           String                 @db.Text
+  description                     String?                @db.Text
+  responseType                    String
+  options                         Json?
+  required                        Boolean                @default(false)
+  photoRequired                   Boolean                @default(false)
+  deficiencyPhotoRequired         Boolean                @default(false)
+  deficiencyDescriptionEnabled    Boolean?
+  isFailFollowUp                  Boolean                @default(false)
+  sourceParentQuestionId          String?
+  parentQuestionTitle             String?                @db.Text
+  displayOrder                    Int
+  rawQuestion                     Json
+  createdAt                       DateTime               @default(now())
+  updatedAt                       DateTime               @updatedAt
+
+  @@unique([formId, sourceQuestionId])
+  @@index([formId])
+  @@index([sectionId])
+  @@index([sourceQuestionId])
+  @@index([responseType])
+  @@map("inspection_form_questions")
+}
+
+/// Relational mirror of an immutable published form version section.
+model InspectionFormVersionSection {
+  id              String                          @id @default(cuid())
+  formVersionId   String
+  formVersion     FormVersion                     @relation(fields: [formVersionId], references: [id], onDelete: Cascade)
+  sourceSectionId String
+  title           String                          @db.Text
+  description     String?                         @db.Text
+  displayOrder    Int
+  questions       InspectionFormVersionQuestion[]
+  createdAt       DateTime                        @default(now())
+  updatedAt       DateTime                        @updatedAt
+
+  @@unique([formVersionId, sourceSectionId])
+  @@index([formVersionId])
+  @@map("inspection_form_version_sections")
+}
+
+/// Relational mirror of an immutable published form version question.
+model InspectionFormVersionQuestion {
+  id                              String                       @id @default(cuid())
+  formVersionId                   String
+  formVersion                     FormVersion                  @relation(fields: [formVersionId], references: [id], onDelete: Cascade)
+  sectionId                       String
+  section                         InspectionFormVersionSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  sourceQuestionId                String
+  sourceSectionId                 String
+  title                           String                       @db.Text
+  description                     String?                      @db.Text
+  responseType                    String
+  options                         Json?
+  required                        Boolean                      @default(false)
+  photoRequired                   Boolean                      @default(false)
+  deficiencyPhotoRequired         Boolean                      @default(false)
+  deficiencyDescriptionEnabled    Boolean?
+  isFailFollowUp                  Boolean                      @default(false)
+  sourceParentQuestionId          String?
+  parentQuestionTitle             String?                      @db.Text
+  displayOrder                    Int
+  rawQuestion                     Json
+  answers                         InspectionAnswer[]
+  createdAt                       DateTime                     @default(now())
+  updatedAt                       DateTime                     @updatedAt
+
+  @@unique([formVersionId, sourceQuestionId])
+  @@index([formVersionId])
+  @@index([sectionId])
+  @@index([sourceQuestionId])
+  @@index([responseType])
+  @@map("inspection_form_version_questions")
+}
+
+/// A normalized answer for one question in one inspection submission.
+model InspectionAnswer {
+  id                    String                         @id @default(cuid())
+  inspectionSubmissionId String
+  inspectionSubmission  InspectionSubmission           @relation(fields: [inspectionSubmissionId], references: [id], onDelete: Cascade)
+  formVersionQuestionId String
+  formVersionQuestion   InspectionFormVersionQuestion @relation(fields: [formVersionQuestionId], references: [id], onDelete: Restrict)
+  questionId            String
+  choiceValue           String?                        @db.Text
+  choicesValue          String[]
+  textValue             String?                        @db.Text
+  numberValue           Decimal?                       @db.Decimal(18, 4)
+  ratingValue           Int?
+  rawAnswer             Json
+  isFailed              Boolean                        @default(false)
+  isNotApplicable       Boolean                        @default(false)
+  hasDeficiencies       Boolean                        @default(false)
+  deficiencyCount       Int                            @default(0)
+  deficiencies          InspectionDeficiency[]
+  answerMedia           InspectionAnswerMedia[]
+  createdAt             DateTime                       @default(now())
+  updatedAt             DateTime                       @updatedAt
+
+  @@unique([inspectionSubmissionId, formVersionQuestionId])
+  @@index([inspectionSubmissionId])
+  @@index([formVersionQuestionId])
+  @@index([questionId])
+  @@map("inspection_answers")
+}
+
+/// A normalized deficiency extracted from a failed PASS_FAIL_DEFICIENCIES inspection question.
+/// The original inspection_submissions.payload JSON remains intact; this table is the
+/// query/reporting source and future bridge to punch/work items.
+model InspectionDeficiency {
+  id                     String                       @id @default(cuid())
+  inspectionAnswerId     String
+  inspectionAnswer       InspectionAnswer             @relation(fields: [inspectionAnswerId], references: [id], onDelete: Cascade)
+  sourceDeficiencyId     String
+  description            String                       @db.Text
+  severity               String?
+  count                  Int                          @default(1)
+  media                  InspectionDeficiencyMedia[]
+  createdAt              DateTime                     @default(now())
+  updatedAt              DateTime                     @updatedAt
+
+  @@unique([inspectionAnswerId, sourceDeficiencyId])
+  @@index([inspectionAnswerId])
+  @@map("inspection_deficiencies")
+}
+
+/// Media attached to a normalized inspection deficiency.
+model InspectionDeficiencyMedia {
+  id                     String                 @id @default(cuid())
+  inspectionDeficiencyId String
+  inspectionDeficiency   InspectionDeficiency   @relation(fields: [inspectionDeficiencyId], references: [id], onDelete: Cascade)
+  storageUrl             String                 @db.Text
+  storageKey             String?
+  mimeType               String?
+  fileSizeBytes          Int?
+  localUrl               String?                @db.Text
+  caption                String?                @db.Text
+  imageAnnotation        Json?
+  createdAt              DateTime               @default(now())
+
+  @@unique([inspectionDeficiencyId, storageUrl])
+  @@index([inspectionDeficiencyId])
+  @@map("inspection_deficiency_media")
+}
+
+/// Media attached to a normalized inspection answer (question-level capturedFiles).
+model InspectionAnswerMedia {
+  id                 String           @id @default(cuid())
+  inspectionAnswerId String
+  inspectionAnswer   InspectionAnswer @relation(fields: [inspectionAnswerId], references: [id], onDelete: Cascade)
+  storageUrl         String           @db.Text
+  storageKey         String?
+  mimeType           String?
+  fileSizeBytes      Int?
+  localUrl           String?          @db.Text
+  caption            String?          @db.Text
+  imageAnnotation    Json?
+  createdAt          DateTime         @default(now())
+
+  @@unique([inspectionAnswerId, storageUrl])
+  @@index([inspectionAnswerId])
+  @@map("inspection_answer_media")
+}
+
+/// Admin-managed in-app announcement campaigns (rich HTML, optional CTA, versioned re-blast).
+model AppAnnouncement {
+  id              String   @id @default(cuid())
+  slug            String   @unique
+  titleEn         String
+  titleEs         String
+  /// Sanitized HTML — bold, lists, links, inline images (see lib/announcements/sanitize-announcement-html.ts)
+  bodyEn          String   @db.Text
+  bodyEs          String   @db.Text
+  heroImageUrlEn  String?
+  heroImageUrlEs  String?
+  ctaLabelEn      String?
+  ctaLabelEs      String?
+  ctaAction       String   @default("DISMISS_ONLY")
+  ctaHref         String?
+  audience        String   @default("ALL")
+  campaignVersion Int      @default(1)
+  startsAt        DateTime
+  endsAt          DateTime
+  active          Boolean  @default(true)
+  priority        Int      @default(0)
+  createdBy       String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  dismissals AppAnnouncementDismissal[]
+
+  @@index([active, startsAt, endsAt])
+  @@map("app_announcements")
+}
+
+/// Per-user dismiss for a specific campaign version (cross-device).
+model AppAnnouncementDismissal {
+  id              String   @id @default(cuid())
+  announcementId  String
+  userId          String
+  campaignVersion Int
+  dismissedAt     DateTime @default(now())
+
+  announcement AppAnnouncement @relation(fields: [announcementId], references: [id], onDelete: Cascade)
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([announcementId, userId, campaignVersion])
+  @@index([userId, announcementId])
+  @@map("app_announcement_dismissals")
+}

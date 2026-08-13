@@ -1,0 +1,484 @@
+# Deploy to Railway
+#
+# Triggered automatically on pushes to `main` (production) and `dev` (staging).
+# Manual: Actions → Deploy → Run workflow → choose branch (`dev` or `main`).
+# Unit and integration tests must pass before the Railway deployment is triggered.
+#
+# Required secrets:
+#   RAILWAY_TOKEN      – Railway service token (Settings → Tokens)
+#   RAILWAY_SERVICE_ID – Railway service ID for the target environment
+#
+# Optional secrets (used for post-deploy smoke tests):
+#   RAILWAY_DEV_URL    – Deployed dev URL (e.g. https://command-center-dev.up.railway.app)
+#   RAILWAY_PROD_URL   – Deployed prod URL (e.g. https://command-center.up.railway.app)
+
+name: Deploy
+run-name: "Deploy → ${{ github.ref_name }} by ${{ github.actor }}"
+
+on:
+  push:
+    branches: [main, dev]
+    # `.github/workflows/track-copilot-rounds.yml` pushes a docs-only commit
+    # to `dev` after every merge to append to the metrics JSONL and
+    # regenerate the dashboard. Without this paths-ignore, every such
+    # auto-commit would trigger a full deploy cycle (unit + integration +
+    # build + Railway + verify), doubling CI cost per PR and undoing the
+    # deploy-time cuts shipped in PR #664. Both filenames are append-only
+    # data artefacts — no app code depends on them, so skipping deploy is
+    # safe. If a deploy is ever actually needed after touching these files,
+    # use workflow_dispatch to run it manually. Note: GitHub's paths-ignore
+    # treats "any commit where EVERY changed file matches paths-ignore" as
+    # ignored — so a normal merge that happens to also touch these files
+    # will still deploy correctly.
+    paths-ignore:
+      - 'docs/COPILOT_ROUNDS_METRICS.jsonl'
+      - 'docs/agent-context/copilot-rounds-dashboard.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    # For workflow_dispatch: only allow dev or main to prevent accidental feature-branch deploys.
+    # Push events are already scoped to [main, dev] by the on: trigger above.
+    if: github.event_name == 'push' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Run unit tests
+        run: npm run test:unit
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test?schema=public"
+          AUTH_SECRET: "ci-test-secret"
+          NEXTAUTH_URL: "http://localhost:3000"
+          VITEST_SILENT_API: "1"
+
+  integration-tests:
+    name: Integration Tests
+    if: github.event_name == 'push' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Run integration tests
+        run: npm run test:integration
+        env:
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test?schema=public"
+          AUTH_SECRET: "ci-test-secret"
+          NEXTAUTH_URL: "http://localhost:3000"
+          VITEST_SILENT_API: "1"
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    # No `needs:` — build is independent of tests and runs in parallel with them.
+    # The downstream `deploy` job still needs all three (unit, integration, build)
+    # to pass before Railway is invoked, so Railway never deploys a build that
+    # skipped either test suite. Critical path becomes
+    # max(unit-tests, integration-tests, build) instead of tests + build,
+    # saving ~2m37s on a typical dev deploy.
+    if: github.event_name == 'push' || github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      # Cache Next.js incremental build output. On a cache hit, webpack skips
+      # re-parsing and re-compiling unchanged modules, dropping `next build`
+      # from ~2m37s to ~60–90s. The key hashes repository build inputs only —
+      # NOT `**/*.ts` — because that glob would match `node_modules/**/*.d.ts`
+      # after `npm ci` runs, making hashFiles very slow and causing cache-key
+      # churn unrelated to app code. This step runs BEFORE `npm ci` so the
+      # workspace doesn't contain `node_modules/` when hashFiles evaluates.
+      - name: Cache Next.js build
+        uses: actions/cache@v4
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-${{ hashFiles('app/**/*.{ts,tsx}', 'components/**/*.{ts,tsx}', 'lib/**/*.{ts,tsx}', 'i18n/**/*.{ts,tsx}', 'messages/**/*.json', 'types/**/*.{ts,tsx}', 'proxy.ts', 'next.config.ts', 'tailwind.config.ts', 'postcss.config.mjs') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}-
+
+      - run: npm ci
+
+      - name: Next.js build
+        run: npm run build
+        env:
+          # TypeScript check after webpack compile exceeds Node's default ~2GB heap on
+          # ubuntu-latest once the app grows (see deploy run OOM after PR #1938 merge).
+          NODE_OPTIONS: --max-old-space-size=6144
+          DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/test?schema=public"
+          AUTH_SECRET: "ci-test-secret"
+          NEXTAUTH_URL: "http://localhost:3000"
+          SKIP_ENV_VALIDATION: "1"
+          CHECKPOINT_DISABLE: "1"
+
+  deploy:
+    name: Deploy to Railway (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, build]
+    environment: ${{ github.ref_name == 'main' && 'production' || 'dev' }}
+    # 20 min: Railway build (~4 min) + health check retry window (10 min) + buffer.
+    # Without this cap a hung build would block the runner for hours.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check required secrets
+        run: |
+          MISSING=""
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            MISSING="$MISSING\n  • RAILWAY_TOKEN_PROD / RAILWAY_TOKEN_DEV — environment-scoped Railway project tokens"
+          fi
+          if [ -z "$RAILWAY_SERVICE_ID" ]; then
+            MISSING="$MISSING\n  • RAILWAY_SERVICE_ID — go to Railway → your service → Settings → copy Service ID"
+          fi
+          if [ -z "$DEPLOY_URL" ]; then
+            MISSING="$MISSING\n  • RAILWAY_DEV_URL / RAILWAY_PROD_URL — deployed app URL used by the verify health-check job"
+          fi
+          if [ -n "$MISSING" ]; then
+            echo ""
+            echo "❌ Deploy skipped — missing required GitHub Actions secrets:"
+            printf "$MISSING"
+            echo ""
+            echo ""
+            echo "Add them at: GitHub → Settings → Secrets and variables → Actions → New repository secret"
+            echo ""
+            exit 1
+          fi
+          echo "✓ Railway secrets present — proceeding with deploy"
+        env:
+          RAILWAY_TOKEN: ${{ github.ref_name == 'main' && secrets.RAILWAY_TOKEN_PROD || secrets.RAILWAY_TOKEN_DEV }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+          DEPLOY_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+      # continue-on-error: CLI can time out after upload while Railway still deploys.
+      # Verify job is the hard gate (HTTP 200). Secrets check above has no continue-on-error.
+      - name: Deploy to Railway
+        continue-on-error: true
+        run: |
+          echo "Token length: ${#RAILWAY_TOKEN} chars"
+          ENVIRONMENT="${{ github.ref_name == 'main' && 'production' || 'dev' }}"
+          echo "Deploying service $RAILWAY_SERVICE_ID to Railway environment: $ENVIRONMENT"
+          # No --detach: CLI blocks until Railway's build+deploy completes and exits
+          # non-zero if the build fails. This makes Railway build failures visible
+          # in GH Actions instead of silently succeeding while the old container
+          # continues serving the verify health check.
+          #
+          # Retry: the CLI sometimes times out talking to backboard.railway.com after
+          # upload started; the deploy may still succeed on Railway. Retries reduce
+          # false-red workflows without weakening real failure signal (verify still gates).
+          MAX_ATTEMPTS=3
+          attempt=1
+          while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+            echo "Railway CLI attempt $attempt of $MAX_ATTEMPTS"
+            if npx --yes @railway/cli@4 up --service "$RAILWAY_SERVICE_ID" --environment "$ENVIRONMENT"; then
+              exit 0
+            fi
+            if [ "$attempt" -eq "$MAX_ATTEMPTS" ]; then
+              echo "::error::Railway CLI failed after $MAX_ATTEMPTS attempts"
+              exit 1
+            fi
+            echo "Waiting 45s before retry..."
+            sleep 45
+            attempt=$((attempt + 1))
+          done
+        env:
+          RAILWAY_TOKEN: ${{ github.ref_name == 'main' && secrets.RAILWAY_TOKEN_PROD || secrets.RAILWAY_TOKEN_DEV }}
+          RAILWAY_SERVICE_ID: ${{ secrets.RAILWAY_SERVICE_ID }}
+
+  verify:
+    name: Verify Deployment (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: [deploy]
+    # Hard gate — NO continue-on-error. conclusion=success means HTTP 200 confirmed.
+    # Runs after deploy job finishes; Railway step uses continue-on-error so verify/smoke
+    # still run when the CLI flakes. Missing secrets still fail the deploy job and skip verify.
+    steps:
+      - name: Wait for app to be healthy
+        run: |
+          # Strip trailing slash to avoid double-slash in URL (e.g. BASE_URL/ + /api/health)
+          BASE_URL="${BASE_URL%/}"
+          if [ -z "$BASE_URL" ]; then
+            echo "❌ BASE_URL secret is empty — cannot verify deployment."
+            echo "Set RAILWAY_DEV_URL or RAILWAY_PROD_URL in GitHub Actions secrets."
+            exit 1
+          fi
+          HEALTH_URL="$BASE_URL/api/health"
+          echo "Health check: $HEALTH_URL"
+          for i in $(seq 1 20); do
+            # -L follows redirects; -s suppresses progress; -o captures body; -w captures HTTP code
+            HTTP=$(curl -sL -o /tmp/health.json -w "%{http_code}" "$HEALTH_URL" 2>/dev/null || echo "000")
+            echo "  attempt $i: HTTP $HTTP"
+            if [ "$HTTP" = "200" ]; then
+              echo "✅ DEPLOYED AND HEALTHY"
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "❌ Health check timed out after 5 minutes — Railway container did not come up"
+          exit 1
+        env:
+          BASE_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+  smoke-test:
+    name: Smoke Test (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    needs: [deploy, verify]
+    # Non-blocking: Playwright smoke tests are a bonus check. The hard health gate
+    # is the verify job above. Smoke failures here are surfaced in CI logs but
+    # never flip the deploy to failed.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Health check — wait for deployment to be ready
+        id: health
+        run: |
+          if [ -z "$BASE_URL" ]; then
+            echo "BASE_URL not configured — skipping health check"
+            echo "Set RAILWAY_DEV_URL or RAILWAY_PROD_URL in repository secrets."
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Checking $BASE_URL/api/health ..."
+          for i in $(seq 1 20); do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/health" || echo "000")
+            echo "  attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "✅ Health check passed"
+              echo "reachable=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$i" = "20" ]; then
+              echo "⚠️  Health check timed out — RAILWAY_DEV_URL/RAILWAY_PROD_URL may be unreachable from CI."
+              echo "   Update the secret in GitHub → Settings → Secrets and variables → Actions."
+              echo "reachable=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 15
+          done
+        env:
+          BASE_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+      # Cache Playwright's Chromium binary (~200MB) so we don't re-download it
+      # on every deploy. The key hashes the whole package-lock.json, so ANY
+      # dependency change (not just @playwright/test) busts the cache — this is
+      # conservative by design: a Playwright bump buried in a transitive
+      # dependency would still invalidate, at the cost of occasional
+      # unnecessary re-downloads when unrelated deps change.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # Cache hit: skip the full install (saves the binary download).
+      # Cache miss: do the full install (downloads binary + installs deps).
+      - name: Install Playwright (full)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npm run test:e2e:install
+
+      # System deps must be present even on cache hit — they live at /usr/lib,
+      # not in ~/.cache/ms-playwright, so they aren't restored from the cache.
+      # This command is much faster than the full install (~10s vs ~60s).
+      - name: Install Playwright system deps
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Smoke E2E tests against deployed environment
+        if: steps.health.outputs.reachable == 'true'
+        run: npx playwright test e2e/smoke.spec.ts --reporter=list
+        env:
+          BASE_URL: ${{ github.ref_name == 'main' && secrets.RAILWAY_PROD_URL || secrets.RAILWAY_DEV_URL }}
+
+  # Deploy-duration regression guard + timing log.
+  #
+  # This runs as a SEPARATE job AFTER smoke-test so that both the current run's
+  # measurement window and the baseline's measurement window use the same
+  # phase boundary — specifically the `deploy` JOB's own started_at /
+  # completed_at timestamps. Measuring the *workflow's* `updated_at` in a
+  # mid-workflow step would under-measure the current run (smoke-test still
+  # hasn't run) while baseline runs include smoke-test — an asymmetric
+  # comparison that would miss real regressions. Using the deploy job's
+  # started_at / completed_at gives an apples-to-apples signal and is
+  # available for both current and baseline by the time this job runs.
+  timing-check:
+    name: Deploy timing regression check
+    runs-on: ubuntu-latest
+    needs: [deploy, verify, smoke-test]
+    if: always() && needs.verify.result == 'success'
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Compute deploy-job durations + compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          # Prefix-match on the deploy job's display name so branch parameterization
+          # (Deploy to Railway (dev) vs (main)) doesn't break the lookup.
+          #
+          # This helper is a regression guard, not a hard dependency — a
+          # transient GitHub API failure (rate limit, 5xx, network blip) must
+          # not fail the deploy workflow. Isolate the `gh api` call with
+          # `set +e` so a non-zero exit is caught locally, annotated, and
+          # returned as an empty duration rather than aborting the step.
+          extract_deploy_job_duration() {
+            local run_id="$1"
+            local job_json gh_status
+            set +e
+            job_json=$(gh api "repos/${REPO}/actions/runs/${run_id}/jobs" \
+              --jq '[.jobs[] | select(.name | startswith("Deploy to Railway"))] | .[0] // empty' 2>&1)
+            gh_status=$?
+            set -e
+            if [ "$gh_status" -ne 0 ]; then
+              echo "::warning::gh api failed for run ${run_id} (exit ${gh_status}) — timing-check skipping this run. Output: ${job_json}" >&2
+              echo ""
+              return
+            fi
+            if [ -z "$job_json" ] || [ "$job_json" = "null" ]; then
+              echo ""
+              return
+            fi
+            local started ended
+            started=$(echo "$job_json" | jq -r '.started_at // empty')
+            ended=$(echo "$job_json" | jq -r '.completed_at // empty')
+            if [ -z "$started" ] || [ -z "$ended" ] || [ "$started" = "null" ] || [ "$ended" = "null" ]; then
+              echo ""
+              return
+            fi
+            echo $(( $(date -u -d "$ended" +%s) - $(date -u -d "$started" +%s) ))
+          }
+
+          CURRENT_SEC=$(extract_deploy_job_duration "$RUN_ID")
+          if [ -z "$CURRENT_SEC" ]; then
+            echo "⚠️  Could not read current run's deploy job duration — skipping check."
+            exit 0
+          fi
+          CURRENT_MIN_FRAC=$(awk -v s="$CURRENT_SEC" 'BEGIN{printf "%.1f", s/60}')
+          echo "Current deploy job: ${CURRENT_SEC}s (${CURRENT_MIN_FRAC} min) on branch ${BRANCH}"
+
+          # Last 4 successful deploys to same branch, excluding current.
+          # Use `--status completed` (a run status) combined with an explicit
+          # conclusion filter rather than `--status success` (which is really a
+          # conclusion, not a status — the gh CLI happens to accept it but the
+          # canonical API model keeps status and conclusion separate). Fetch
+          # extra rows so we still end up with 4 successes after filtering out
+          # the current run and any non-success conclusions.
+          #
+          # Non-fatal: if the API call fails, warn + skip the regression check
+          # rather than failing the whole workflow. See also the
+          # extract_deploy_job_duration helper above for the same pattern.
+          set +e
+          PRIOR_IDS=$(gh run list --repo "$REPO" --workflow deploy.yml --branch "$BRANCH" \
+            --status completed --limit 10 --json databaseId,conclusion \
+            --jq "[.[] | select(.conclusion == \"success\" and .databaseId != ${RUN_ID})] | .[0:4][].databaseId" 2>&1)
+          LIST_STATUS=$?
+          set -e
+          if [ "$LIST_STATUS" -ne 0 ]; then
+            echo "::warning::gh run list failed (exit ${LIST_STATUS}) — regression check skipped. Output: ${PRIOR_IDS}"
+            exit 0
+          fi
+
+          TOTAL=0
+          COUNT=0
+          DETAILS=""
+          for PID in $PRIOR_IDS; do
+            DUR=$(extract_deploy_job_duration "$PID")
+            if [ -n "$DUR" ]; then
+              TOTAL=$((TOTAL + DUR))
+              COUNT=$((COUNT + 1))
+              DETAILS="${DETAILS}  run ${PID}: ${DUR}s\n"
+            fi
+          done
+
+          if [ "$COUNT" -lt 2 ]; then
+            echo "⏭️  Only ${COUNT} prior runs had a measurable deploy job — need ≥2 for a baseline. Skipping."
+            {
+              echo "### Deploy timing — ${BRANCH}"
+              echo ""
+              echo "| Metric | Value |"
+              echo "|---|---|"
+              echo "| This run (deploy job) | ${CURRENT_SEC}s (${CURRENT_MIN_FRAC} min) |"
+              echo "| Baseline | not enough prior runs (${COUNT}/2) |"
+              echo "| Run URL | https://github.com/${REPO}/actions/runs/${RUN_ID} |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          AVG_SEC=$(( TOTAL / COUNT ))
+          AVG_MIN_FRAC=$(awk -v s="$AVG_SEC" 'BEGIN{printf "%.1f", s/60}')
+          THRESHOLD_SEC=$(( (AVG_SEC * 3) / 2 ))
+          THRESHOLD_MIN_FRAC=$(awk -v s="$THRESHOLD_SEC" 'BEGIN{printf "%.1f", s/60}')
+
+          echo "Rolling average of last ${COUNT} deploy jobs: ${AVG_SEC}s (${AVG_MIN_FRAC} min)"
+          echo "Regression threshold (150%): ${THRESHOLD_SEC}s (${THRESHOLD_MIN_FRAC} min)"
+          printf "Prior runs:\n%b" "$DETAILS"
+
+          STATUS="ok"
+          NOTE=""
+          if [ "$CURRENT_SEC" -gt "$THRESHOLD_SEC" ]; then
+            STATUS="regression"
+            NOTE="Current deploy took ${CURRENT_MIN_FRAC} min — >150% of the ${AVG_MIN_FRAC} min rolling average. Investigate."
+          fi
+
+          {
+            echo "### Deploy timing — ${BRANCH}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| This run (deploy job) | ${CURRENT_SEC}s (${CURRENT_MIN_FRAC} min) |"
+            echo "| Rolling avg (last ${COUNT}) | ${AVG_SEC}s (${AVG_MIN_FRAC} min) |"
+            echo "| 150% threshold | ${THRESHOLD_SEC}s (${THRESHOLD_MIN_FRAC} min) |"
+            echo "| Status | ${STATUS} |"
+            if [ -n "$NOTE" ]; then
+              echo "| Note | ${NOTE} |"
+            fi
+            echo "| Run URL | https://github.com/${REPO}/actions/runs/${RUN_ID} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$STATUS" = "regression" ]; then
+            echo "::warning::Deploy duration regression on ${BRANCH}: ${CURRENT_MIN_FRAC} min vs ${AVG_MIN_FRAC} min rolling avg (>150%). See step summary."
+            # Soft-fail: exit 1 so the job is red in the Actions UI and the
+            # regression shows up in deploy-failure alerting. Health has
+            # already been confirmed HTTP 200 by the `verify` job, so traffic
+            # is safe — this is a CI-cost quality alarm, not a traffic gate.
+            exit 1
+          fi
+          echo "✅ Deploy duration within threshold."

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent — silently fetches origin/dev every 5 minutes.
+  Does NOT merge or touch your working tree. Just keeps remote refs fresh
+  so `git status`, `check:dev`, and the dev-sync poller always have
+  up-to-date info without a manual fetch.
+
+  Install (one-time):
+    bash scripts/install-dev-sync-agent.sh
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.cpbuild.commandcenter.devsync.plist
+    rm ~/Library/LaunchAgents/com.cpbuild.commandcenter.devsync.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cpbuild.commandcenter.devsync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/git</string>
+    <string>-C</string>
+    <!-- Replaced by install-dev-sync-agent.sh with the actual repo path -->
+    <string>REPO_PATH</string>
+    <string>fetch</string>
+    <string>origin</string>
+    <string>dev</string>
+    <string>--quiet</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/cpbuild-devsync.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/cpbuild-devsync-error.log</string>
+</dict>
+</plist>

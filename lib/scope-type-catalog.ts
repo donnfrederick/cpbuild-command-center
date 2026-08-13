@@ -1,0 +1,31 @@
+/** Raw UPM scope name → canonical code (flooring subcontractor catalog). */
+export const SCOPE_TO_CANONICAL: Record<string, string> = {
+  "Broadloom Carpet": "CPB",
+  Cabinetry: "CAB",
+  CABIU: "CAB",
+  Carpet: "CPB",
+  "Carpet Tile": "CPT",
+  "Ceramic Tile": "TIL",
+  Concrete: "CNF",
+  Countertop: "TOP",
+  Countertops: "TOP",
+  "Epoxy Flooring": "CNF",
+  "Floor Tile": "TIL",
+  "Hardwood Flooring": "HDW",
+  LVT: "LVT",
+  "LVT Stairs": "LVT",
+  "Polished Concrete": "CNF",
+  "Resilient Athletic Flooring": "RAF",
+  "Resilient Athlletic Flooring": "RAF",
+  "Rubber Base": "RBF",
+  "Rubber Flooring": "RBF",
+  "Sealed Concrete": "CNF",
+  Tile: "TIL",
+  TOPIU: "TOP",
+  VCT: "VCT",
+  "Vinyl Flooring": "VYL",
+  "Wall Tile": "TIL",
+  "Wood Flooring": "HDW",
+};
+
+export const VALID_FLOORING_SCOPE_NAMES = Object.keys(SCOPE_TO_CANONICAL);

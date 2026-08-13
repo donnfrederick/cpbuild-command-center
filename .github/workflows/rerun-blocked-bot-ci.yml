@@ -1,0 +1,47 @@
+name: Rerun blocked PR CI
+
+# Open PRs targeting dev often stall at action_required after auto-rebase
+# (github-actions[bot] becomes the triggering actor). Rerunning those runs
+# via a user-scoped PAT is equivalent to "Approve and run" — Phil never
+# needs to click manually. Pairs with scripts/rerun-blocked-bot-ci.ts.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  rerun-blocked-ci:
+    name: Rerun blocked PR CI
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      - name: Rerun action_required workflows on open dev PRs
+        # Best-effort helper — must not block merges if rerun fails (e.g. token scope).
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            npx tsx scripts/rerun-blocked-bot-ci.ts "${{ github.event.pull_request.number }}"
+          else
+            npx tsx scripts/rerun-blocked-bot-ci.ts
+          fi

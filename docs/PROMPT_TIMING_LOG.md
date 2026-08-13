@@ -1,0 +1,2 @@
+--- 2026-03-11 7:47 PM | 111s | feature | added sync-main-to-dev workflow to prevent squash-merge conflicts on future dev→main PRs
+--- 2026-03-11 7:53 PM | 278s | feature | merged sync-main-to-dev workflow to dev and prod via PR #251 and #252

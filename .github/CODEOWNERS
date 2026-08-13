@@ -1,0 +1,6 @@
+# CODEOWNERS — Phil is primary; Alvin is temporary co-owner for hotfix coverage
+# while Phil is out (Jul 2026). Revert to sole @cp-build-dev when Phil returns
+# (see docs/PENDING_REMINDERS.md).
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+*   @cp-build-dev @alvincpbuild

@@ -1,0 +1,57 @@
+# Copilot auto-review — PERMANENTLY DISABLED (Jul 2026).
+#
+# Phil disabled automatic Copilot PR reviews to reduce AI cost and agent wait
+# time. Cursor pre-push discipline + CI + deploy verify replace the loop.
+# See docs/PENDING_REMINDERS.md (Copilot disabled — permanent).
+#
+# Manual only: workflow_dispatch if a one-off Copilot review is ever needed.
+# Also disable the org ruleset "Copilot code review" (ID 13245507) in GitHub UI:
+#   https://github.com/cp-build-dev-ops/command-center-reboot/rules/13245507
+#
+# Historical reference (2026-04-17): use `gh pr edit --add-reviewer @copilot`
+# with COPILOT_REVIEWER_PAT — never the dead REST requested_reviewers endpoint.
+
+name: Copilot Review
+run-name: "Copilot review (manual only) — ${{ github.actor }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to request Copilot review on"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  request-review:
+    name: Request Copilot Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require explicit PR number
+        env:
+          GH_TOKEN: ${{ secrets.COPILOT_REVIEWER_PAT }}
+        run: |
+          if [ -z "${{ inputs.pr_number }}" ]; then
+            echo "::error::workflow_dispatch requires pr_number input"
+            exit 1
+          fi
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::COPILOT_REVIEWER_PAT secret is not set — Copilot auto-review is disabled. See docs/COPILOT_LEARNINGS.md 2026-04-17 entry."
+            exit 1
+          fi
+          gh pr edit "${{ inputs.pr_number }}" \
+            --repo "${{ github.repository }}" \
+            --add-reviewer "@copilot"
+          REQUESTED=$(gh api \
+            "repos/${{ github.repository }}/pulls/${{ inputs.pr_number }}/requested_reviewers" \
+            --jq '[.users[].login] | join(",")')
+          if [ "${REQUESTED}" = "Copilot" ] || echo "${REQUESTED}" | grep -qw "Copilot"; then
+            echo "✓ Copilot added to requested_reviewers: [${REQUESTED}]"
+          else
+            echo "::warning::Copilot was NOT added to requested_reviewers and no recent Copilot review exists. The PAT may lack the right scope, or GitHub silently dropped the request. Check docs/COPILOT_LEARNINGS.md 2026-04-17 entry."
+          fi

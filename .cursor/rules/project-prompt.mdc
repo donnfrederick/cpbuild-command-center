@@ -1,0 +1,246 @@
+---
+description: Project setup prompt and instructions
+globs:
+alwaysApply: true
+---
+
+# PWA with Authentication & Team Management
+
+You are setting up a production-intent Progressive Web App with real authentication, role-based access control, and team management.
+
+## The Four Phases — Plan → Work → Review → Compound
+
+Every task in this repo moves through four named phases. Each one has a dedicated piece of machinery; this map tells you where to look.
+
+| Phase | What happens | Canonical machinery |
+|-------|--------------|---------------------|
+| **Plan** | Calibrate the user's intent, search prior learnings, stress-test the draft adversarially, then produce a `CreatePlan` output ending with a visible `## Self-review` section. | `.cursor/rules/plan-calibration.mdc` (Steps 0–4) |
+| **Work** | Session-start checklist (PR queue, deploys, pending reminders), then write code against the Pre-Push Self-Check matrix below. For bug fixes, follow the test-first debug protocol. | This file (session-start + Pre-Push), `.cursor/rules/debug-protocol.mdc` (bug fixes) |
+| **Review** | PRs auto-request Copilot via `.github/workflows/copilot-review.yml`; agent resolves comments up to a 3-round cap. | `.github/workflows/copilot-*.yml`, round cap in `.cursor/rules/git-pr-workflow.mdc` |
+| **Compound** | Log new catches in `docs/COPILOT_LEARNINGS.md`; distill frequent patterns into a new Pre-Push Self-Check row; periodically refresh to prune stale rules. | `docs/COPILOT_LEARNINGS.md`, Pre-Push matrix in this file, `npm run refresh:learnings` every 50 PRs or 90 days |
+
+The phases are sequential within one task but overlapping across tasks — you are almost always in Work on one PR, Review on another, and Compound on the one that just merged. The point of naming them is so that when something feels off ("why is this review taking 5 rounds?"), you know which phase's machinery needs tightening.
+
+## Core Requirements
+
+- **Authentication**: Real auth (not mocked). Use environment variables for secrets. Never trust client-side authorization -- UI gating is for UX only; enforce all authz on the server.
+- **Roles & Permissions**: Admin, Member roles at minimum. Permission catalog as constants. Server-side enforcement.
+- **Team Management**: Admin can invite teammates. Invites can be accepted. Team directory visible to members.
+- **Security**: Keep secrets out of code. Use environment variables and secrets management. Top-notch security from day one -- do not defer it.
+- **Accessibility**: Skip links, focus management, aria-live toasts. Maintain accessibility from day one.
+- **PWA**: Manifest, service worker, offline indicator.
+- **Localization (i18n)**: English and Spanish across the entire site. Use `next-intl` with locale-prefixed routing (`/en/...`, `/es/...`). All UI strings must be externalized to translation files. Date/number formatting must respect locale. Add a locale switcher in the UI. Treat i18n as a first-class requirement for every new feature and component.
+
+## Workflow Rules
+
+- Work in small commits. Each commit should compile and keep the app running.
+- Preserve existing structure and component boundaries. Prefer minimal diffs.
+- Do not add fake seeded data. Only bootstrap admin/workspace allowed.
+- After each task: run build + lint + tests and note results.
+- For every change: update types/interfaces, update tests, update docs.
+
+## Environment Parity
+
+Use `npm ci` (not `npm install`) for installs. Node ≥22, npm ≥10. Project `.npmrc` has `legacy-peer-deps=true`. See DEV_NOTES.md#environment-parity. When helping with install issues (ERESOLVE, audit differences, hangs), direct to that section.
+
+## Agent Session Start — Required Checklist
+
+> **PHIL'S AGENT ONLY.** This checklist — PR queue checks, auto-merge decisions, and PENDING_REMINDERS — applies exclusively to Phil's agent (the person you are helping is Phil Amour / `cp-build-dev`). If you are serving a RAD dev, Hannah, or any other contributor, **skip this entire section**. Contributor agents should load the relevant `docs/agent-context/` files for the current task and follow the contributor workflow in `git-pr-workflow.mdc`.
+
+**Run this at the start of every conversation, before taking on new work.** This is not optional — it prevents PRs from going stale between sessions.
+
+```bash
+# Step 1: Check for any pending agent tasks (Copilot reviews, conflicts, CI failures, deploy failures)
+gh issue list --repo cp-build-dev-ops/command-center-reboot \
+  --label "agent-action-required,deploy-failure,conflict" --state open \
+  --json number,title --jq '.[] | "#\(.number): \(.title)"'
+
+# Step 2: Check all open PRs — note base branch and mergeable state
+gh pr list --repo cp-build-dev-ops/command-center-reboot --state open \
+  --json number,title,headRefName,baseRefName,isDraft,mergeable \
+  --jq '.[] | "#\(.number) [\(.baseRefName)←\(.headRefName)] \(.title) | mergeable:\(.mergeable)"'
+
+# Step 3: Check the latest prod deploy status
+gh run list --repo cp-build-dev-ops/command-center-reboot \
+  --workflow deploy.yml --branch main --limit 1 \
+  --json databaseId,status,conclusion,headSha \
+  --jq 'if length == 0 then "prod deploy: no runs found" else .[0] | "prod deploy: \(.status)/\(.conclusion) sha:\(.headSha[0:7])" end'
+
+# Step 4: Check the latest dev deploy status
+gh run list --repo cp-build-dev-ops/command-center-reboot \
+  --workflow deploy.yml --branch dev --limit 1 \
+  --json databaseId,status,conclusion,headSha \
+  --jq 'if length == 0 then "dev deploy: no runs found" else .[0] | "dev deploy: \(.status)/\(.conclusion) sha:\(.headSha[0:7])" end'
+
+# Step 5: Unblock stalled CI (action_required) — agent-owned, never nag Phil
+# After auto-rebase, github-actions[bot] triggers workflows that pause until
+# approved. `gh run rerun` unblocks them — same effect as "Approve and run".
+npm run pr:rerun-blocked-ci 2>/dev/null || true
+gh run list --repo cp-build-dev-ops/command-center-reboot --limit 20 \
+  --json databaseId,name,conclusion,headBranch,event \
+  --jq '.[] | select(.conclusion == "action_required") | "⚠️  STILL BLOCKED after rerun: run #\(.databaseId) — \(.name) (branch: \(.headBranch))"'
+```
+
+**Decision order:**
+1. If prod deploy is `failure` → diagnose using the prod build failure protocol in `git-pr-workflow.mdc` before doing anything else
+2. If `agent-action-required` or `deploy-failure` issues exist → handle those next
+   - **If the issue is also labeled `copilot-retro`** → it was auto-opened by `.github/workflows/track-copilot-rounds.yml` after a PR merged with `rounds >= 2`. The body has a per-comment checklist. Open a retro PR (see [PR #677](https://github.com/cp-build-dev-ops/command-center-reboot/pull/677) for format): themed entries to `docs/COPILOT_LEARNINGS.md` grouped by root cause, new Pre-Push Self-Check rows in `.cursor/rules/project-prompt.mdc`, and a regression-guard test if the pattern is testable. Close the issue via `Closes #<n>` in the retro PR body. Do this **before** starting new feature work — the retro closes the loop on rules that would otherwise let the same pattern recur.
+3. If Step 5 still shows `action_required` runs after `npm run pr:rerun-blocked-ci` → retry once; only escalate to Phil if rerun fails twice (rare — usually means missing `actions:write` on the gh token)
+4. Read `docs/ACTIVE_BRANCHES.md` — surface any branches with status `pushed, awaiting local verify` so Phil knows what is waiting for his review; **prune any row whose branch already merged** (no open PR + last PR for that `head` is `MERGED`) and commit the cleanup so merged branches never linger in the table
+5. If any open PR is merge-ready (CI green, no conflicts):
+   - **Dependabot PRs** (`dependabot/` branches): If CI is green and no security-sensitive files are touched, enable `--auto` merge immediately — no approval needed
+   - **Phil's PRs** opened in a prior session: ask Phil "PR #N looks ready to merge — want me to auto-merge it?" before acting
+   - **Any PR targeting `main` directly** → close it, reopen targeting `dev` (see Golden Rule in `git-pr-workflow.mdc`)
+5. Then continue with whatever the conversation is about
+6. **Check ngrok tunnel** — run the tunnel check command. If no URL is returned, start the tunnel immediately using `nohup` (see `session-context.mdc` → ngrok section). Report the URL as part of the opening status. Never skip this step and never ask Phil to start ngrok.
+
+```bash
+curl -sf http://localhost:4040/api/tunnels \
+  | python3 -c "import sys,json; t=json.load(sys.stdin)['tunnels']; [print(x['public_url']) for x in t]" \
+  || echo "NO TUNNEL"
+```
+
+**Step 3 — Check pending reminders**
+
+Read `docs/PENDING_REMINDERS.md` and include any unchecked `[ ]` items in the opening status report. Surface them as a brief list after the PR queue summary. Do not nag — one mention per session is enough. If Phil dismisses an item, mark it `[x]` in the file immediately.
+
+**If Copilot pause protocol is unchecked:** follow the substitute PR Ready checklist in that reminder — no Copilot requests, no Copilot wait loops; lean on Pre-Push Self-Check, CI, and compound learnings instead (`git-pr-workflow.mdc` → Copilot pause exception).
+
+**Additional check — Surface the Copilot rounds trend**
+
+(Named non-numerically on purpose: the code-block at the top of this section already has its own "Step 1 – Step 5" numbering, and adding another "Step 4" / "Step 5" heading here would produce two competing numbering schemes in the same procedure. Treat this check as happening in parallel with the numbered bash-block steps above, not as a sequel to them.)
+
+Extract the trend line from the top of `docs/agent-context/copilot-rounds-dashboard.md` (the one-line summary inside the `Session-start trend line` fenced block) and include it in the opening status report. This line tells Phil at a glance whether recursive self-improvement is actually making PRs cheaper to review. Example:
+
+```
+Last 5 PRs rounds: 7 → 2 → 3 → 2 → 1 ↓ | preventable ratio: 0.58 → 0.21 ↓
+```
+
+If both arrows are ↓ we're succeeding: fewer rounds, fewer preventable catches. If the rounds arrow is ↑ or → we are shipping code that still needs the same amount of Copilot catching — the agent's pre-push self-check is slipping. If the preventable-ratio arrow is ↑ Copilot is catching more things we have rules for but did not check — strengthen discipline, do not loop more. The dashboard file lists novel-comment candidates for new Pre-Push rows; skim them when the trend stalls.
+
+Report the queue state to Phil in ≤3 sentences at the top of the session (PR queue + pending reminders + trend line). Do not ask what to work on — decide and act.
+
+**See `git-pr-workflow.mdc` for:**
+- PR creation gate (must ask Phil before opening any PR)
+- Branch conflict check protocol (read ACTIVE_BRANCHES.md before branching)
+- How to chunk PRs into independent deployable units
+- Safe-to-merge conditions and security-sensitive file list
+- Copilot feedback loop procedure
+- Notification format after merging
+
+## Starting the Dev Server — Required Pre-flight
+
+**Any time the dev server is started** — whether Phil requests it or the agent initiates it — always `git pull origin dev` first before running `npm run dev`:
+
+```bash
+git pull origin dev
+npm run dev
+```
+
+This is unconditional. Do not skip the pull even if the branch appears current. The `predev` (`check-dev-updates.sh`) script exits non-zero when the local branch is behind origin/dev, so pulling first prevents that interruption.
+
+## Pre-Push Self-Check — Read Before Writing New Code
+
+> **For bug fixes specifically:** the Pre-Push matrix catches classes of bugs at push time; `.cursor/rules/debug-protocol.mdc` catches root causes at fix time. When fixing any non-cosmetic bug, follow the four-step test-first protocol there in addition to the matrix below.
+
+Before writing any code in these categories, read `docs/COPILOT_LEARNINGS.md` to apply patterns we've already been caught missing:
+
+| Writing... | Check for... |
+|-----------|-------------|
+| GitHub Actions workflows | Trigger scope (`status`/`check_suite` are repo-wide — prefer `pull_request`), `grep -Fq` not `grep -q`, dedup before posting comments/issues, no `--admin` bypasses |
+| Any GraphQL query with `first: N` | Rule applies to **every** `first: N` in the query, including **nested** connection fields (`comments`, `reactions`, `timelineItems`, etc.) — not just the top-level one. For each connection: always fetch `totalCount`; assert fetched length equals `totalCount` after pagination; paginate (or fail loudly — `sys.exit(1)` / `throw`) if `totalCount >= N`. Audit every `first: N` individually, not the query as a whole. See PR #672 — `reviews(first: 100)` and `comments(first: 1)` were both missed because the agent only applied the rule to the top-level `reviewThreads` connection. |
+| Any workflow that posts a PR comment or GitHub Issue | Check for existing one first, update in place |
+| Any dev/staging-only behavior gated on an env var | Add `isNonProd()` guard checking both `NODE_ENV` and `APP_ENV` |
+| Any logging of user data | Use `maskEmail()` or equivalent; never log PII in plaintext |
+| Prisma transactions | Use array-form `$transaction([...])` — interactive transactions are incompatible with Railway's PgBouncer |
+| Shell string with special characters in `run:` blocks | Build with `printf` into a variable first; never embed backticks, `**`, em dashes directly |
+| Zod schema field on data from Unifier/external API | Never use `z.string().min(1)` — use `.default("")` or `.optional()`. Unifier can return `null` for: `projectManagerName`, `clientName`, `address`, `location`, `status`, `startDate`, `fieldDueDate`, `estimatorName`, `installManagerName` |
+| Integration test fixtures for any API that consumes Unifier data | Must include at least one fixture where each nullable Unifier field is `""`, `null`, or omitted — never let every fixture hardcode a non-empty value for a field Unifier can leave blank |
+| New form component that submits to an API | Must have a unit test that renders with a null/empty fixture and asserts the POST succeeds (not 422) |
+| Any `.cursor/rules/*.mdc` file (new or modified) | Check all other rule files for contradictions. Check `docs/agent-context/` for content that's now inconsistent. Scan the same file for internal contradictions before committing. |
+| Before writing a new **process rule** into `.cursor/rules/` (a rule about "when X happens, do Y") | Run the automation-first check: (1) can a workflow detect the trigger mechanically? (2) does the rule depend on agent memory across sessions? (3) would Phil have to prompt the agent to invoke it? If any answer is yes, the rule must ship with a workflow that creates a forcing function (auto-opened issue, failing test, required status check) — the `.cursor/rules/` entry alone is not sufficient. See `docs/COPILOT_LEARNINGS.md` 2026-04-17 entry (retro automation). |
+| Any code that requests a GitHub reviewer (workflow, script, ad-hoc `gh` invocation) | **DEAD API — do not use:** `gh api POST /repos/.../pulls/<N>/requested_reviewers -f 'reviewers[]=copilot'` (or `reviewers[]=copilot-pull-request-reviewer[bot]`). Since 2026-04-17 this returns 200 OK but does NOT add Copilot or trigger a review. **Use instead:** `gh pr edit <N> --add-reviewer "@copilot"` (gh ≥ 2.88, GraphQL-backed). After any reviewer-request call, **read back** `gh api .../requested_reviewers --jq '[.users[].login]'` and assert the expected identity appears — never trust `200 OK` as confirmation of side effects. See `docs/COPILOT_LEARNINGS.md` 2026-04-17 entry (github-api/silent-drift) and the regression guard at `__tests__/unit/copilot-review-workflow-command.unit.test.ts`. |
+| Any side-effect API call (request a reviewer, create an issue, add a label, set a variable) | The agent verifies the side effect by reading back the state — never trust the HTTP status code alone. GitHub's REST API has been observed to return `200 OK` while silently no-oping (see 2026-04-17 entry). Pattern: make the call, then query the resource and assert the expected change is visible. If the readback doesn't match, log the failure loudly and surface to Phil — do not continue as if the call succeeded. |
+| Any `docs/agent-context/*.md` file (new or modified) | Check the cross-reference dependency map in `agent-context.mdc` — every row that applies must be updated in the same commit. |
+| Any `lib/*.ts` or `lib/**/*.ts` (new service or utility added) | Add it to `docs/agent-context/key-services.md` in the same PR. |
+| Any new `RoleCode` added to `lib/permissions.ts` | Three files must be updated in the same PR: (1) `scripts/bootstrap-roles.ts` `ROLE_DEFINITIONS` — so the DB row is created on deploy; (2) `components/layout/RolePreviewPicker.tsx` `ALL_ROLES` — so admins can preview as the new role; (3) `app/api/admin/role-preview/route.ts` `VALID_ROLE_CODES` — so the API accepts it. If the role's `formatRole()` output would be wrong (e.g. "Bi Analyst" vs "BI Analyst"), add it to `ROLE_DISPLAY_NAMES` in `lib/permissions.ts` too. |
+| Any `app/api/**/route.ts` (new route or changed Zod schema) | Update `docs/agent-context/api-endpoints.md` in the same PR. |
+| Any `app/api/**/route.ts` (session check) | Import `getSession` from `@/lib/dev-session` — never `auth` directly in route handlers. |
+| Any `app/api/devtools/**/route.ts` | Every HTTP method (GET, POST, PATCH, DELETE) must call `requireDevToolsAdmin()` — not just POST. `isDevToolsAllowed()` is a production guard, not an auth check. |
+| Any query param used in a constructed URL | Validate against an explicit allowlist before interpolating — never trust raw query string values in URLs. |
+| Any call to `fetchAllRows()` with downstream filter or slice | Pass `maxRows` cap — never fetch unbounded rows then filter in memory. |
+| Adding a new `import` from an external package | Verify the package is in `package.json` before merging — `npm ci` in CI will fail if it's missing, even if local works. |
+| Try/catch split-declaration variable (`let x;`) | Always annotate the type explicitly — e.g. `let x: Awaited<ReturnType<typeof fn>>;` — never leave the outer `let` untyped under strict TS. |
+| Any new React component with interactive or icon-only elements | Icon-only buttons need `aria-label`; toggle buttons need `aria-pressed`. Screen readers do not reliably read `title` attributes. |
+| Any new or modified React component that renders **any user-visible text** (button label, toast message, placeholder, `aria-label`, modal title, error, badge text, tab label, column header, empty-state message, helper text) | **Every string must be in `messages/en.json` AND `messages/es.json` before the PR opens. No exceptions. Never hardcode English.** Pattern: `useTranslations("namespace")` in client components, `getTranslations("namespace")` in server components. Before staging, visually scan the diff for: `toast("`, `toast.error("`, `toast.success("`, `aria-label="`, `placeholder="`, and any JSX text node that is a complete English phrase — every one of these must be a `t("key")` call instead. If a suitable namespace doesn't exist yet, create one. Both `en.json` and `es.json` must be updated in the same commit — never commit one without the other. |
+| Any `style=` prop or `className` with a CSS **color** value in a React component | **Never hardcode hex (`#fff`, `#2E5C8A`), named colors (`white`, `black`), or raw `rgba()`/`rgb()` values.** Every color must reference a token: `var(--primary-600)`, `var(--neutral-200)`, `var(--error-600)`, etc. (full token list in `frontend-patterns.md`). Before staging, scan modified component files: `grep -n '#[0-9a-fA-F]\{3,\}\|rgba\?\(' file.tsx` — every match must either use `var(--)` or be a documented exception in `COPILOT_LEARNINGS.md`. Spinner/loading icons: always `className="animate-spin"` — never `animation: "spin 1s linear infinite"` in a style prop (no `@keyframes spin` exists in this bundle). Box shadows: use `var(--shadow-1)` or `var(--shadow-2)`. Modal overlays: use `var(--overlay-bg, rgba(0,0,0,0.5))` so the token can override the fallback. |
+| Any `prisma/schema.prisma` change | Update `docs/agent-context/database-schema.md` in the same PR. After editing the schema the agent MUST immediately run the dev server restart sequence itself — **never ask Phil to do it**: (1) `npm run dev:kill`, (2) `npx prisma generate`, (3) `git pull origin dev && npm run dev:start`, (4) `npm run dev:status` must show health 200. Do not proceed until the health check passes. When a 500 appears on any route after a schema change, immediately check `grep -c "ModelName" node_modules/.prisma/client/index.js` — if 0, the client is stale; run the restart sequence. |
+| Any `prisma/schema.prisma` change that **adds a new model** | Also add the model to `app/api/devtools/data/route.ts` (WHITELIST + TABLE_NAMES + TABLE_CONFIG) and update the table-count assertion in `__tests__/integration/devtools-data.integration.test.ts`. |
+| Any exported interface with an `Array<Record<string, unknown>>` field | Replace with a named interface — `Record<string, unknown>` is not acceptable as a public type contract. |
+| Before running `git add`, `git checkout`, or `git checkout -b` | Run `git status --short` first. If unrelated files are present, stash them before proceeding. Never commit files you didn't intentionally change. |
+| Any local `prisma migrate deploy` / `prisma migrate dev` (agent or script) | **Use `npm run db:deploy` / `npm run db:migrate` only** — never bare `npx prisma migrate *`. Guard: `lib/db/guard-migrate-target.ts` + `scripts/guard-migrate-target-cli.ts` blocks when `DATABASE_URL`/`DIRECT_URL` fingerprint matches `.env.prod.local`. Override only with Phil's explicit approval: `ALLOW_PROD_MIGRATE=1`. After sourcing `.env.prod.local` or prod Railway queries, `unset DATABASE_URL DIRECT_URL` before migrating. See `session-context.mdc` → "Prisma migrations — production guard". |
+| Any API route returns 500 in local dev | Before asking Phil anything, run the stale-client diagnostic: `grep -c "SuspectModel" node_modules/.prisma/client/index.js`. If 0 → stale Prisma client. Run the restart sequence from `session-context.mdc` immediately. Do NOT tell Phil to restart — the agent runs it. |
+| When Phil mentions a change to deploy or a PR to merge | Before acting, run `git diff origin/main..origin/dev --name-only` to confirm the change isn't already in `main`. Don't cherry-pick or re-apply something that's already there. |
+| Any `LAYOUT_RULES.md` token value change | Update `docs/agent-context/frontend-patterns.md` and `docs/HANNAH_AGENT_ONBOARDING_PROMPT.md` in the same commit. |
+| Any new `scripts/bootstrap-*.ts` | Add a call in `scripts/railway-start.sh` in the same PR. **Migrations own schema; bootstrap scripts own reference/seed data.** If it is not in `railway-start.sh`, it does not exist in any deployed environment — regardless of what you ran locally. The script must be idempotent (safe to re-run on every container start). |
+| Any `scripts/railway-start.sh` change that adds a bootstrap step | Verify the script is idempotent before merging. Check: does it skip gracefully if the data already exists? Test locally with `npm run bootstrap:<name>` twice in a row and confirm no errors. |
+| After any push to an open PR that touches **reviewable content** (source code, tests, workflows, `.cursor/rules/*.mdc`, `docs/**/*.md`, config) | **While Copilot pause is active** (`docs/PENDING_REMINDERS.md` → Copilot pause protocol unchecked): skip — do not request Copilot. **Otherwise:** in most cases you do not need to do anything — `.github/workflows/copilot-review.yml` auto-requests Copilot on every qualifying push using a user-scoped PAT (`COPILOT_REVIEWER_PAT`). If you are re-requesting manually (e.g. the workflow didn't fire because the change fell outside its path filters, or you want to force a re-review in a session), use `gh pr edit <PR_NUMBER> --repo cp-build-dev-ops/command-center-reboot --add-reviewer "@copilot"` with a **user-scoped token** (not `GITHUB_TOKEN` — that silently no-ops). Then read `gh api repos/cp-build-dev-ops/command-center-reboot/pulls/<PR_NUMBER>/requested_reviewers` back and confirm `Copilot` appears (or that a recent Copilot review exists on HEAD — Copilot is auto-removed from requested_reviewers once it reviews). **Do NOT** use the dead REST endpoint `gh api ... /requested_reviewers -f 'reviewers[]=copilot*'` — it returns 200 OK and silently drops the request. Rule and doc changes DO warrant re-request (Copilot catches real bugs in `.mdc` / `.md`). Skip ONLY for truly non-reviewable commits: empty / whitespace-only / lone version-bump. See `.cursor/rules/git-pr-workflow.mdc` → "Copilot Auto-Review Setup" and `docs/COPILOT_LEARNINGS.md` 2026-04-17 entry for full background. |
+| Any new GitHub Actions workflow that **auto-commits or auto-pushes** to `dev` or `main` | Adding such a workflow implicitly changes the trigger surface of every other workflow that reacts to the same branch. Before merging: (1) add `paths-ignore` entries in `.github/workflows/deploy.yml` (under `on.push`) for **every file** the new workflow commits, so docs-only / metrics-only bot commits don't fire a full deploy cycle; (2) audit every other workflow that triggers on `push` to `dev`/`main` (e.g. `ci.yml`) and apply the same `paths-ignore`; (3) prefer uploading a build artefact or opening a PR instead of auto-committing when real-time landing isn't required. See PR #672 — missing this undid the 50% deploy-time cuts from PR #664 and was only caught by Copilot on round 3. |
+| Any GitHub Actions workflow that calls `git push` to a protected branch (`dev` or `main`) | **Direct push will fail silently with GH006** — `dev` and `main` require PRs + status checks and the workflow's `github-actions[bot]` token has no bypass. Use `peter-evans/create-pull-request@v7` + `gh pr merge --squash --auto` instead (canonical reference: `.github/workflows/track-copilot-rounds.yml`). The failure mode is invisible in the feature-PR context — it shows up on the post-merge `dev`-context workflow run long after the agent has moved on. See `docs/COPILOT_LEARNINGS.md` → `metrics-silent-fail` for the PR #677/#682 incident. |
+| Any GitHub Actions workflow with **multiple independent side effects** (creates a GitHub issue AND commits a file AND posts a PR comment, etc.) | Order them so the **most important / most externally-visible** side effect runs FIRST. Independent side effects must not chain under `set -e` such that one step's failure silently prevents the others. If they must be sequenced for data-flow reasons, gate the later ones with `if: always()` or `if: success() || failure()` and make each step idempotent. Failure mode: the step that opens a forcing-function GitHub issue was sequenced after a step that silently failed on every run, so the issue was never created. Reference: PR #682 (`track-copilot-rounds.yml`). |
+| Any code that checks for the **Copilot bot identity** (author/login matching) | Match against the full known set, not a single string literal: `{copilot, copilot-pull-request-reviewer, copilot-pull-request-reviewer[bot], github-copilot[bot]}`. When modelling review data from GitHub's GraphQL API, fetch and count BOTH `reviews.body` (review-level) AND `reviewThreads.comments[].body` (thread-level) — Copilot uses both surfaces. Canonical reference: `.github/workflows/copilot-implement-suggestions.yml`. |
+| Any user-supplied or externally-sourced string rendered into a **Markdown artefact** (table row, bullet, heading, code block content, embedded in dashboard output) | Pass through a sanitizer that: (a) collapses whitespace to single spaces, (b) for table contexts escapes `\`, `\|`, `` ` ``, (c) replaces runs of 3+ backticks with a space-padded plain-text token (`` ``` `` → ` [code block] `), then re-collapses whitespace, (d) truncates with an ellipsis (`\u2026`), not bare `[:N]`. Reference implementation: `sanitize_snippet()` in `scripts/render-copilot-dashboard.py`. **Always render the Markdown and visually inspect the output before committing** — sanitizer unit tests alone won't catch adversarial inputs. See PR #672 — 6 separate Copilot rounds all about Markdown sanitization edge cases. |
+| Any Python file I/O in a **workflow script or automation** (`read_text`, `write_text`, `open`) | Pass `encoding="utf-8"` explicitly. Never rely on platform default encoding — `ubuntu-latest` happens to be UTF-8 today, but that's not part of Python's contract. Failure mode is silent `UnicodeDecodeError`/`UnicodeEncodeError` on any non-UTF-8 locale. |
+| Any `concurrency: group: ...` in a workflow that writes to a **shared** branch (not the PR's own branch) | Scope the group to the push target (e.g. `<workflow-name>-dev`), not `${{ github.event.pull_request.number }}`. Per-PR grouping allows concurrent runs to race over the same files on the shared branch, producing non-fast-forward push failures and silent dropped records. Per-PR scoping is only correct for workflows that operate on the PR's own branch. |
+| Before adding a new **numbered step or heading** to a procedure in `.cursor/rules/*.mdc` or `docs/**/*.md` | Run `grep -n "Step [0-9]" <file>` (or "Step N —" / "### Step N") in the surrounding ~100 lines. If the number would duplicate an existing heading, use a non-numeric sub-heading (e.g. "**Additional check —**") with an inline note explaining the naming choice. Duplicate numbering produces ambiguous procedures and was specifically caught on PR #672. |
+| When editing an `.mdc` / `.md` rule file to add an **exception, override, or carve-out** to an existing procedure | After the edit, `grep -n "<key phrase from the original rule>" <file>` to find every nearby reference to the procedure being changed, and verify each adjacent paragraph still reads correctly alongside the new exception. Cross-section contradictions (e.g. adding "release PRs use `--merge`" without updating the checklist that says "`--squash --auto`") are easy to miss because each section passes its own isolated review. |
+
+This list grows as `COPILOT_LEARNINGS.md` grows. When in doubt, read the full log.
+
+---
+
+## Pre-PR Audit — REQUIRED Before Every `gh pr create`
+
+Run both audits on every modified component or page file before opening a PR. Fix every finding first. Zero output = clear to open.
+
+### i18n audit — catch hardcoded English strings
+
+```bash
+# For each modified component/page file, check for hardcoded strings
+git diff --name-only origin/dev | grep -E "^(components|app/\[locale\])" | while read f; do
+  HITS=$(grep -nE 'toast\(["'"'"'][A-Z]|toast\.(error|success|warning)\(["'"'"'][A-Z]|aria-label=["'"'"'][A-Za-z]|placeholder=["'"'"'][A-Za-z]' "$f" 2>/dev/null | grep -v 't("' | grep -v 'tCommon(' | grep -v 'tFeedback(' | grep -v '\.t\.')
+  [ -n "$HITS" ] && echo "=== HARDCODED STRINGS in $f ===" && echo "$HITS"
+done
+```
+
+Any output = hardcoded string that must become a `messages/` key. Fix before committing.
+
+### CSS color audit — catch hardcoded color values
+
+```bash
+# For each modified component/page file, check for hardcoded colors in style props
+git diff --name-only origin/dev | grep -E "^(components|app/\[locale\])" | while read f; do
+  HITS=$(grep -nE "style=.*#[0-9a-fA-F]{3,}|style=.*rgba?\(|animation:.*spin|animation:.*\"spin" "$f" 2>/dev/null | grep -v "var(--")
+  [ -n "$HITS" ] && echo "=== HARDCODED COLORS in $f ===" && echo "$HITS"
+done
+```
+
+Any output = hardcoded color or spin animation that must be a CSS variable (`var(--...)`) or `className="animate-spin"`. Fix before committing. If it is a genuine exception (e.g. fullscreen dark-overlay UI), document it in `COPILOT_LEARNINGS.md` before the PR opens — never leave it undocumented.
+
+### Both audits must show zero output before the PR is opened. No exceptions.
+
+---
+
+## Phase 0 — Repo Orientation (Do First)
+
+1. Identify current app structure: routes, auth, modules, components
+2. Identify mock stores and where to replace with real API calls
+3. Locate permission catalog and settings schema
+4. Confirm accessibility patterns
+5. Confirm PWA setup
+6. Write a brief DEV_NOTES.md describing repo structure
+
+## Phase 1 — Backend Foundation
+
+Create a backend layer supporting auth, invites, roles, and users with strict server-side authorization.
+

@@ -1,0 +1,219 @@
+/**
+ * ScopeTrack — Design Tokens
+ * Design System Skeleton v0.1
+ *
+ * Brand seed:
+ *   Product:    ScopeTrack (construction install scope management)
+ *   Tone:       Reliable, efficient, straightforward, clear
+ *   Temp:       Neutral / calm
+ *   Density:    Medium
+ *   Character:  Sharp
+ *   Feeling:    "In control and on top of it"
+ *   Cognitive:  Analytical / directive
+ *   Discipline: Strict system
+ *
+ * Authoring rules:
+ *   - All tokens are semantic or foundational — no decorative values.
+ *   - Radius stays flat (4px max default). No softening without justification.
+ *   - Colors are defined in OKLCH for perceptual consistency.
+ *   - Spacing follows a 4px base unit (Tailwind default).
+ *   - Shadow/elevation is minimal — one step per layer.
+ */
+
+/* ─── Foundational Palette ────────────────────────────────────────────────────
+   Raw palette. Do not use these directly in components — use semantic tokens.
+   ─────────────────────────────────────────────────────────────────────────── */
+:root {
+  /* Blueprint Blue — primary brand color */
+  --palette-blue-50:  oklch(0.974 0.016 263);   /* #EFF6FF */
+  --palette-blue-100: oklch(0.937 0.034 264);   /* #DBEAFE */
+  --palette-blue-200: oklch(0.882 0.067 264);   /* #BFDBFE */
+  --palette-blue-300: oklch(0.809 0.117 263);   /* #93C5FD */
+  --palette-blue-400: oklch(0.715 0.171 262);   /* #60A5FA */
+  --palette-blue-500: oklch(0.623 0.214 261);   /* #3B82F6 */
+  --palette-blue-600: oklch(0.546 0.232 263);   /* #2563EB */
+  --palette-blue-700: oklch(0.487 0.213 264);   /* #1D4ED8 ← primary */
+  --palette-blue-800: oklch(0.424 0.186 264);   /* #1E40AF */
+  --palette-blue-900: oklch(0.369 0.155 264);   /* #1E3A8A */
+  --palette-blue-950: oklch(0.278 0.118 265);   /* #172554 */
+
+  /* Amber — secondary / progress / construction callout */
+  --palette-amber-50:  oklch(0.987 0.022 80);   /* #FFFBEB */
+  --palette-amber-100: oklch(0.967 0.055 80);   /* #FEF3C7 */
+  --palette-amber-200: oklch(0.935 0.100 79);   /* #FDE68A */
+  --palette-amber-300: oklch(0.890 0.140 78);   /* #FCD34D */
+  --palette-amber-400: oklch(0.842 0.162 76);   /* #FBBF24 */
+  --palette-amber-500: oklch(0.769 0.168 75);   /* #F59E0B ← secondary */
+  --palette-amber-600: oklch(0.706 0.163 72);   /* #D97706 */
+  --palette-amber-700: oklch(0.621 0.148 65);   /* #B45309 */
+  --palette-amber-800: oklch(0.526 0.127 57);   /* #92400E */
+  --palette-amber-900: oklch(0.444 0.097 52);   /* #78350F */
+
+  /* Slate — neutral system (cool-gray, sharp, information-dense) */
+  --palette-slate-50:  oklch(0.984 0.003 247);  /* #F8FAFC */
+  --palette-slate-100: oklch(0.968 0.006 264);  /* #F1F5F9 */
+  --palette-slate-200: oklch(0.929 0.012 262);  /* #E2E8F0 */
+  --palette-slate-300: oklch(0.869 0.018 262);  /* #CBD5E1 */
+  --palette-slate-400: oklch(0.704 0.026 261);  /* #94A3B8 */
+  --palette-slate-500: oklch(0.579 0.030 261);  /* #64748B */
+  --palette-slate-600: oklch(0.487 0.030 262);  /* #475569 */
+  --palette-slate-700: oklch(0.392 0.028 261);  /* #334155 */
+  --palette-slate-800: oklch(0.279 0.027 260);  /* #1E293B */
+  --palette-slate-900: oklch(0.185 0.020 264);  /* #0F172A */
+  --palette-slate-950: oklch(0.113 0.014 265);  /* #020617 */
+
+  /* Feedback — semantic-only, not for decoration */
+  --palette-green-500:  oklch(0.627 0.176 150); /* #22C55E */
+  --palette-green-600:  oklch(0.527 0.166 150); /* #16A34A */
+  --palette-green-700:  oklch(0.451 0.150 150); /* #15803D */
+  --palette-green-100:  oklch(0.951 0.050 150); /* #DCFCE7 */
+
+  --palette-red-500:    oklch(0.637 0.237 27);  /* #EF4444 */
+  --palette-red-600:    oklch(0.577 0.245 27);  /* #DC2626 */
+  --palette-red-100:    oklch(0.936 0.050 17);  /* #FEE2E2 */
+
+  --palette-yellow-400: oklch(0.853 0.178 84);  /* #FACC15 */
+  --palette-yellow-100: oklch(0.973 0.046 80);  /* #FEF9C3 */
+}
+
+/* ─── Semantic Tokens ─────────────────────────────────────────────────────────
+   These are the tokens components MUST reference.
+   ─────────────────────────────────────────────────────────────────────────── */
+:root {
+  /* ── Surface & Layout ──────────────────────────────────────────────────── */
+  --st-bg:               var(--palette-slate-50);   /* page background */
+  --st-bg-elevated:      oklch(1 0 0);              /* card / panel surface */
+  --st-bg-overlay:       oklch(1 0 0);              /* dialog / popover surface */
+  --st-bg-subtle:        var(--palette-slate-100);  /* muted region, disabled */
+  --st-bg-inverse:       var(--palette-slate-900);  /* inverse / dark surface */
+
+  /* ── Text ──────────────────────────────────────────────────────────────── */
+  --st-text-primary:     var(--palette-slate-900);  /* headings, high-emphasis */
+  --st-text-secondary:   var(--palette-slate-600);  /* body, labels */
+  --st-text-muted:       var(--palette-slate-400);  /* placeholder, caption */
+  --st-text-inverse:     var(--palette-slate-50);   /* text on dark surfaces */
+  --st-text-link:        var(--palette-blue-700);   /* interactive text */
+
+  /* ── Brand — Primary (Blueprint Blue) ─────────────────────────────────── */
+  --st-primary:          var(--palette-blue-700);
+  --st-primary-hover:    var(--palette-blue-800);
+  --st-primary-active:   var(--palette-blue-900);
+  --st-primary-subtle:   var(--palette-blue-50);
+  --st-primary-muted:    var(--palette-blue-100);
+  --st-primary-fg:       oklch(1 0 0);             /* text on primary bg */
+
+  /* ── Brand — Secondary (Amber) ─────────────────────────────────────────── */
+  --st-secondary:        var(--palette-amber-500);
+  --st-secondary-hover:  var(--palette-amber-600);
+  --st-secondary-subtle: var(--palette-amber-50);
+  --st-secondary-muted:  var(--palette-amber-100);
+  --st-secondary-fg:     var(--palette-slate-900);  /* text on amber bg */
+
+  /* ── Borders & Dividers ────────────────────────────────────────────────── */
+  --st-border:           var(--palette-slate-200);
+  --st-border-strong:    var(--palette-slate-300);
+  --st-border-subtle:    var(--palette-slate-100);
+  --st-border-focus:     var(--palette-blue-600);
+
+  /* ── Feedback ──────────────────────────────────────────────────────────── */
+  --st-success:          var(--palette-green-600);
+  --st-success-bg:       var(--palette-green-100);
+  --st-success-fg:       var(--palette-green-700);
+
+  --st-warning:          var(--palette-amber-600);
+  --st-warning-bg:       var(--palette-amber-100);
+  --st-warning-fg:       var(--palette-amber-800);
+
+  --st-error:            var(--palette-red-600);
+  --st-error-bg:         var(--palette-red-100);
+  --st-error-fg:         var(--palette-red-600);
+
+  --st-info:             var(--palette-blue-700);
+  --st-info-bg:          var(--palette-blue-50);
+  --st-info-fg:          var(--palette-blue-800);
+
+  /* ── Progress / Scope Status (construction domain semantic) ─────────────
+     Justification: Scope-of-work tracking requires a distinct 5-state status
+     semantic that standard feedback tokens cannot fully represent.
+     ─────────────────────────────────────────────────────────────────────── */
+  --st-status-complete:  var(--palette-green-600);
+  --st-status-active:    var(--palette-blue-700);
+  --st-status-delayed:   var(--palette-red-600);
+  --st-status-pending:   var(--palette-slate-400);
+  --st-status-at-risk:   var(--palette-amber-600);
+
+  /* ── Typography ────────────────────────────────────────────────────────── */
+  --st-font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --st-font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --st-text-display:  2.5rem;    /* 40px — page hero / section header */
+  --st-text-h1:       2rem;      /* 32px */
+  --st-text-h2:       1.5rem;    /* 24px */
+  --st-text-h3:       1.25rem;   /* 20px */
+  --st-text-h4:       1.125rem;  /* 18px */
+  --st-text-body-lg:  1rem;      /* 16px */
+  --st-text-body:     0.875rem;  /* 14px — default body / tables */
+  --st-text-caption:  0.75rem;   /* 12px — meta, timestamps */
+  --st-text-label:    0.75rem;   /* 12px — form labels */
+
+  --st-leading-tight:  1.25;
+  --st-leading-snug:   1.375;
+  --st-leading-normal: 1.5;
+  --st-leading-relaxed:1.625;
+
+  --st-weight-regular: 400;
+  --st-weight-medium:  500;
+  --st-weight-semibold:600;
+  --st-weight-bold:    700;
+
+  /* ── Spacing — 4px base unit ───────────────────────────────────────────── */
+  --st-space-0:    0;
+  --st-space-0-5:  2px;
+  --st-space-1:    4px;
+  --st-space-2:    8px;
+  --st-space-3:    12px;
+  --st-space-4:    16px;
+  --st-space-5:    20px;
+  --st-space-6:    24px;
+  --st-space-8:    32px;
+  --st-space-10:   40px;
+  --st-space-12:   48px;
+  --st-space-16:   64px;
+  --st-space-20:   80px;
+
+  /* ── Corner Radius — sharp character ──────────────────────────────────── */
+  --st-radius-none: 0;
+  --st-radius-sm:   2px;
+  --st-radius:      4px;    /* default — all components */
+  --st-radius-md:   4px;
+  --st-radius-lg:   6px;    /* only for large surfaces (card, modal) */
+  --st-radius-full: 9999px; /* pill — badges, progress tracks only */
+
+  /* ── Shadow / Elevation ────────────────────────────────────────────────── */
+  --st-shadow-none: none;
+  --st-shadow-xs:   0 1px 2px 0 oklch(0 0 0 / 0.05);
+  --st-shadow-sm:   0 1px 3px 0 oklch(0 0 0 / 0.10),
+                    0 1px 2px -1px oklch(0 0 0 / 0.10);
+  --st-shadow-md:   0 4px 6px -1px oklch(0 0 0 / 0.10),
+                    0 2px 4px -2px oklch(0 0 0 / 0.10);
+  --st-shadow-lg:   0 10px 15px -3px oklch(0 0 0 / 0.10),
+                    0 4px 6px -4px oklch(0 0 0 / 0.10);
+
+  /* ── Motion ────────────────────────────────────────────────────────────── */
+  --st-duration-instant: 0ms;
+  --st-duration-fast:    100ms;
+  --st-duration-base:    150ms;
+  --st-duration-slow:    250ms;
+  --st-ease-default:     cubic-bezier(0.16, 1, 0.3, 1);  /* ease-out-expo */
+  --st-ease-in:          cubic-bezier(0.4, 0, 1, 1);
+  --st-ease-out:         cubic-bezier(0, 0, 0.2, 1);
+
+  /* ── Z-index scale ─────────────────────────────────────────────────────── */
+  --st-z-base:     0;
+  --st-z-raised:   10;
+  --st-z-dropdown: 100;
+  --st-z-sticky:   200;
+  --st-z-overlay:  300;
+  --st-z-modal:    400;
+  --st-z-toast:    500;
+}

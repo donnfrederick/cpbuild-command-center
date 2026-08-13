@@ -1,0 +1,44 @@
+# AI Context Layer — Token-Efficient Loading
+
+These structured documentation files give agents the architectural knowledge they need without loading raw source files. Always consult these first.
+
+## Context Files (load in this order for any task)
+
+| File | When to load |
+|------|-------------|
+| `docs/agent-context/project-overview.md` | Always — product, users, workflows, terminology |
+| `docs/agent-context/architecture.md` | Architecture, auth flow, data flow, stack, caveats |
+| `docs/agent-context/database-schema.md` | Any DB query, migration, or model question |
+| `docs/agent-context/backend-patterns.md` | Writing or editing API routes or server logic |
+| `docs/agent-context/frontend-patterns.md` | Writing or editing components, layouts, or forms |
+| `docs/agent-context/api-endpoints.md` | Integrating a client with an API, or adding a new route |
+| `docs/agent-context/key-services.md` | Using `lib/` utilities (auth, db, email, permissions, UPM parsing) |
+
+## Loading Rules
+
+1. **Always load the relevant context files before reading source code**
+2. **Load only the context files relevant to the current task** — not all 7 every time
+3. **Only open source files when you need to read or modify specific logic** the context docs don't cover
+4. **Never load an entire directory** (`components/`, `app/api/`) unless explicitly required
+5. **Prefer searching** (`Grep`, `Glob`) over bulk-reading when you need a specific symbol
+
+## Minimum Load per Task Type
+
+| Task | Load these context files |
+|------|--------------------------|
+| New API route | `architecture.md`, `backend-patterns.md`, `api-endpoints.md` |
+| New component | `frontend-patterns.md`, `architecture.md` |
+| DB query or migration | `database-schema.md`, `backend-patterns.md` |
+| Auth or permissions | `architecture.md`, `key-services.md` |
+| UPM / project rows | `database-schema.md`, `key-services.md` |
+| Debugging an issue | `project-overview.md`, then the relevant domain file |
+| Deploy, CI, Railway, or `deploy.yml` | `project-overview.md` (Deployment table + doc map), `docs/DEPLOYMENT_QUICKSTART.md`, `DEV_NOTES.md` (Deployment section), `.cursor/rules/git-pr-workflow.mdc` — then `.github/workflows/deploy.yml` |
+| New developer onboarding | All 7 files |
+
+## Do Not Repeat What These Files Already State
+
+The context files are the source of truth for architecture, patterns, and conventions. Do not re-read `DEV_NOTES.md`, `PROJECT_TRACKER.md`, or `LAYOUT_RULES.md` for information that's already summarized here — those files are for humans and grow large over time.
+
+## This Rule Is Canonical for Context Loading
+
+`session-context.mdc` defers to this file for context loading strategy. If any other rule file describes loading DEV_NOTES or PROJECT_TRACKER at session start, treat this rule as the override — load `docs/agent-context/` first, fall back to the heavy docs only for information not covered here.

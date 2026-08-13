@@ -1,0 +1,165 @@
+name: Gemini Deep PR Analysis
+run-name: "Gemini analysis (manual only) — PR #${{ inputs.pr_number }} by ${{ github.actor }}"
+
+# DISABLED on every PR push (Jul 2026) — reduces Actions minutes. Run manually
+# from the Actions tab when domain-aware Gemini analysis is wanted.
+# Requires GEMINI_API_KEY.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to analyze"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  analyze:
+    name: Domain-aware code review
+    runs-on: ubuntu-latest
+    # Gemini analysis is informational — never block a PR or deploy.
+    continue-on-error: true
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch PR diff (capped at 12 KB)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr diff "$PR" --repo "$REPO" | head -c 12288 > pr_diff.txt
+          echo "Diff size: $(wc -c < pr_diff.txt) bytes"
+
+      - name: Build Gemini request
+        run: |
+          # Write prompt to a file so jq handles all JSON escaping
+          cat > prompt.txt << 'PROMPT_EOF'
+You are a senior engineer reviewing a pull request for CP Build Command Center, a
+Next.js 16 + Prisma + PostgreSQL construction project management app.
+
+The app ingests data from Oracle Primavera Unifier via a PDS API. These Unifier
+fields are NULLABLE and can be null, empty string, or absent in real data:
+  projectManagerName, clientName, address, location, status, projectPhase,
+  estimatorName, installManagerName, startDate, fieldDueDate, sageProjectId,
+  rfmsProjectId, projectTrack
+
+Focus ONLY on the following four categories that Copilot's standard review misses:
+
+1. SCHEMA_MISMATCH — Zod schema uses z.string().min(1) on a field that Unifier can
+   return as null or empty. Fix: use .default("") or .optional() instead.
+
+2. FIXTURE_GAP — Integration test fixtures hardcode a non-empty value for every
+   nullable Unifier field (e.g. projectManagerName: "PM" in every test case) with
+   no test covering null, "", or the field being omitted.
+
+3. MISSING_COMPONENT_TEST — A form/modal component is added or modified that submits
+   data containing nullable fields, but there is no unit test file for that component.
+
+4. MISSING_IMPORT — A React hook or function is used inside a component but is not
+   present in the import statement for that file (e.g. useEffect used but not imported).
+
+Rules:
+- Report only real issues visible in the diff. Do not invent issues.
+- Maximum 6 findings total across all categories.
+- If no issues are found, respond with exactly: "✅ No domain-specific issues found."
+- Do not repeat issues already covered by standard lint or TypeScript checks.
+
+Format each finding exactly as:
+**[CATEGORY]** `path/to/file.ts` — one-sentence description of the issue and the fix.
+PROMPT_EOF
+
+          # Combine prompt + diff into a single JSON request body
+          jq -n \
+            --rawfile prompt prompt.txt \
+            --rawfile diff pr_diff.txt \
+            '{
+              contents: [{
+                parts: [{
+                  text: ($prompt + "\n\n--- PR DIFF ---\n" + $diff)
+                }]
+              }],
+              generationConfig: {
+                temperature: 0.1,
+                maxOutputTokens: 1024
+              }
+            }' > request.json
+
+      - name: Call Gemini API
+        id: gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          if [ -z "$GEMINI_API_KEY" ]; then
+            echo "GEMINI_API_KEY is not set — skipping analysis."
+            echo "analysis=_Gemini analysis skipped (API key not configured)._" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          HTTP_STATUS=$(curl -s -o response.json -w "%{http_code}" \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d @request.json)
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "Gemini API returned HTTP $HTTP_STATUS"
+            cat response.json
+            echo "analysis=_Gemini analysis unavailable (API error $HTTP_STATUS)._" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ANALYSIS=$(jq -r '.candidates[0].content.parts[0].text // "_No response from model._"' response.json)
+
+          # Write to GITHUB_OUTPUT using heredoc delimiter to handle multi-line safely
+          {
+            echo "analysis<<GEMINI_EOF"
+            echo "$ANALYSIS"
+            echo "GEMINI_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Post or update analysis comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
+          ANALYSIS: ${{ steps.gemini.outputs.analysis }}
+        run: |
+          MARKER="<!-- gemini-pr-analysis -->"
+
+          # Find existing comment ID (update in place — no comment pile-up)
+          EXISTING_ID=$(gh api \
+            "/repos/$REPO/issues/$PR/comments" \
+            --jq "[.[] | select(.body | startswith(\"$MARKER\"))] | .[0].id // empty")
+
+          # Build comment body via printf (avoids markdown-in-shell quoting issues)
+          BODY=$(printf '%s\n### 🤖 Gemini Domain Analysis\n\n_Focused on Unifier nullable fields, schema mismatches, fixture gaps, and missing imports — complements Copilot'\''s syntax review._\n\n%s\n\n---\n_Powered by Gemini 2.0 Flash · [workflow](.github/workflows/gemini-pr-analysis.yml)_' \
+            "$MARKER" "$ANALYSIS")
+
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "/repos/$REPO/issues/comments/$EXISTING_ID" \
+              -f body="$BODY" > /dev/null
+            echo "Updated existing Gemini analysis comment #$EXISTING_ID on PR #$PR"
+          else
+            gh pr comment "$PR" --repo "$REPO" --body "$BODY"
+            echo "Posted new Gemini analysis comment on PR #$PR"
+          fi
+
+  # Always-passing gate job — prevents GitHub from marking the workflow as
+  # failed when `analyze` is skipped (e.g. bot-authored PRs). GitHub treats
+  # a workflow with zero completed jobs as a failure, not a skip.
+  done:
+    name: Gemini check complete
+    runs-on: ubuntu-latest
+    needs: [analyze]
+    if: always()
+    steps:
+      - run: echo "Gemini analysis complete (or intentionally skipped)"
